@@ -30,7 +30,10 @@ a manual install they are `mcp__opencode__delegate`.
 - If you get an **ambiguous** error, the name matched several different models. Choose from the
   candidates it lists, and ask the user only if their intent is unclear.
 - For a reasoning variant, add `#variant`, e.g. `"xai/grok-4.7#high"`.
-- If you omit `model`, the server uses `OPENCODE_DELEGATE_DEFAULT_MODEL`, or opencode's own default.
+- If the user names no model, omit `model`. Tasks that edit files get the default
+  (`opencode-go/muse-spark-1.3-contributor`). Read-only tasks with `auto: false` get the free
+  `opencode/muse-spark-1.3-contributor-free`. Use `auto: false` for reading or summarising files,
+  answering questions about code, and reviews.
 
 ## Writing the brief (`prompt`)
 

@@ -35,7 +35,8 @@ function gitStatus(cwd: string): Set<string> | undefined {
 export async function delegate(input: DelegateInput, signal?: AbortSignal): Promise<DelegateOutcome> {
   const cwd = resolve(config.defaultCwd, input.cwd ?? ".");
   if (!existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
-  const query = input.model ?? config.defaultModel;
+  const auto = input.auto ?? config.auto;
+  const query = input.model ?? (auto ? config.defaultModel : (config.readModel ?? config.defaultModel));
   const model = query ? await resolveModelOrThrow(query) : undefined;
   const files = input.files?.map((f) => (isAbsolute(f) ? f : resolve(cwd, f)));
 
@@ -49,7 +50,7 @@ export async function delegate(input: DelegateInput, signal?: AbortSignal): Prom
     sessionId: input.session_id,
     continueLast: input.continue,
     fork: input.fork,
-    auto: input.auto ?? config.auto,
+    auto,
     title: input.title,
     timeoutMs: (input.timeout_s ?? config.timeoutSec) * 1000,
     signal,

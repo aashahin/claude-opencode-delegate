@@ -25,7 +25,7 @@ const delegateShape = {
     .string()
     .optional()
     .describe(
-      "opencode model: exact 'provider/model' id (e.g. 'opencode-go/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit for the configured default.",
+      `opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config.defaultModel ?? "opencode's default"} for normal tasks, ${config.readModel ?? config.defaultModel ?? "opencode's default"} (free) when auto is false.`,
     ),
   cwd: z.string().optional().describe("Working directory for the task (absolute, or relative to the server's cwd). Defaults to the current project."),
   agent: z.string().optional().describe("opencode agent to use (e.g. 'build', 'plan', or a custom agent)."),
@@ -36,7 +36,7 @@ const delegateShape = {
   auto: z
     .boolean()
     .optional()
-    .describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config.auto}. Set false for read-only analysis.`),
+    .describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
   title: z.string().optional().describe("Session title shown in opencode."),
   timeout_s: z.number().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config.timeoutSec}.`),
 };

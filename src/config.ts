@@ -23,6 +23,12 @@ export function resolveBin(env = process.env): string {
   return "opencode";
 }
 
+/** Unset → fallback; set to "" → undefined (use opencode's own default). */
+function model(v: string | undefined, fallback: string): string | undefined {
+  if (v === undefined) return fallback;
+  return v.trim() || undefined;
+}
+
 function bool(v: string | undefined, dflt: boolean): boolean {
   if (v === undefined || v === "") return dflt;
   return !/^(0|false|no|off)$/i.test(v);
@@ -35,7 +41,9 @@ function int(v: string | undefined, dflt: number): number {
 
 export const config = {
   bin: resolveBin(),
-  defaultModel: process.env.OPENCODE_DELEGATE_DEFAULT_MODEL || undefined,
+  defaultModel: model(process.env.OPENCODE_DELEGATE_DEFAULT_MODEL, "opencode-go/muse-spark-1.3-contributor"),
+  // Used when no model is given and the run is read-only (auto: false): reading, reviews, questions.
+  readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
   timeoutSec: int(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
   maxOutputChars: int(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),

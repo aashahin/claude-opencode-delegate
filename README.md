@@ -103,6 +103,9 @@ You can use exact ids (`opencode-go/grok-4.7`) or loose names (`grok 4.7`, `kimi
 - If a name matches several different models, you get a list of candidates instead of a guess. For
   example, `mimo` matches several MiMo models.
 - Add `#variant` for a reasoning variant: `xai/grok-4.7#high`.
+- If you don't name a model, tasks that edit files use `opencode-go/muse-spark-1.3-contributor`.
+  Read-only tasks (`auto: false`) use the free `opencode/muse-spark-1.3-contributor-free`. You can
+  change both with the env vars below.
 
 ### Tools
 
@@ -140,7 +143,8 @@ conflict.
 | Variable | Default | |
 |---|---|---|
 | `OPENCODE_BIN` | auto-detected | Path to the `opencode` executable. |
-| `OPENCODE_DELEGATE_DEFAULT_MODEL` | opencode's default | Model used when `model` is omitted. |
+| `OPENCODE_DELEGATE_DEFAULT_MODEL` | `opencode-go/muse-spark-1.3-contributor` | Model used when `model` is omitted. Set it to `""` to use opencode's own default. |
+| `OPENCODE_DELEGATE_READ_MODEL` | `opencode/muse-spark-1.3-contributor-free` | Model used when `model` is omitted and `auto` is false (reading files, reviews, questions). Free by default. |
 | `OPENCODE_DELEGATE_AUTO` | `true` | Default for `auto`. |
 | `OPENCODE_DELEGATE_TIMEOUT` | `1800` | Seconds before a run is killed. |
 | `OPENCODE_DELEGATE_MAX_OUTPUT` | `40000` | Maximum number of response characters returned to Claude. |

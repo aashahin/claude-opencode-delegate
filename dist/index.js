@@ -21510,6 +21510,11 @@ function resolveBin(env = process.env) {
   }
   return "opencode";
 }
+function model(v, fallback) {
+  if (v === undefined)
+    return fallback;
+  return v.trim() || undefined;
+}
 function bool(v, dflt) {
   if (v === undefined || v === "")
     return dflt;
@@ -21521,7 +21526,8 @@ function int2(v, dflt) {
 }
 var config2 = {
   bin: resolveBin(),
-  defaultModel: process.env.OPENCODE_DELEGATE_DEFAULT_MODEL || undefined,
+  defaultModel: model(process.env.OPENCODE_DELEGATE_DEFAULT_MODEL, "opencode-go/muse-spark-1.3-contributor"),
+  readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
   timeoutSec: int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
   maxOutputChars: int2(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
@@ -21829,7 +21835,8 @@ async function delegate(input, signal) {
   const cwd = resolve(config2.defaultCwd, input.cwd ?? ".");
   if (!existsSync2(cwd))
     throw new Error(`cwd does not exist: ${cwd}`);
-  const query = input.model ?? config2.defaultModel;
+  const auto = input.auto ?? config2.auto;
+  const query = input.model ?? (auto ? config2.defaultModel : config2.readModel ?? config2.defaultModel);
   const model = query ? await resolveModelOrThrow(query) : undefined;
   const files = input.files?.map((f) => isAbsolute(f) ? f : resolve(cwd, f));
   const before = gitStatus(cwd);
@@ -21842,7 +21849,7 @@ async function delegate(input, signal) {
     sessionId: input.session_id,
     continueLast: input.continue,
     fork: input.fork,
-    auto: input.auto ?? config2.auto,
+    auto,
     title: input.title,
     timeoutMs: (input.timeout_s ?? config2.timeoutSec) * 1000,
     signal
@@ -21958,14 +21965,14 @@ var server = new McpServer({ name: "opencode-delegate", version: package_default
 var text = (t, isError = false) => ({ content: [{ type: "text", text: t }], isError });
 var delegateShape = {
   prompt: string2().min(1).describe("Complete, self-contained task for the opencode model. It cannot see this conversation: include goal, relevant files/paths, constraints, and acceptance criteria."),
-  model: string2().optional().describe("opencode model: exact 'provider/model' id (e.g. 'opencode-go/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit for the configured default."),
+  model: string2().optional().describe(`opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config2.defaultModel ?? "opencode's default"} for normal tasks, ${config2.readModel ?? config2.defaultModel ?? "opencode's default"} (free) when auto is false.`),
   cwd: string2().optional().describe("Working directory for the task (absolute, or relative to the server's cwd). Defaults to the current project."),
   agent: string2().optional().describe("opencode agent to use (e.g. 'build', 'plan', or a custom agent)."),
   files: array(string2()).optional().describe("Files to attach to the message."),
   session_id: string2().optional().describe("Continue an existing opencode session (returned by a previous call) for follow-ups."),
   continue: boolean2().optional().describe("Continue the most recent opencode session in cwd."),
   fork: boolean2().optional().describe("Fork the session given by session_id/continue instead of appending to it."),
-  auto: boolean2().optional().describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config2.auto}. Set false for read-only analysis.`),
+  auto: boolean2().optional().describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config2.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
   title: string2().optional().describe("Session title shown in opencode."),
   timeout_s: number2().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config2.timeoutSec}.`)
 };

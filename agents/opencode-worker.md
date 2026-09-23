@@ -8,8 +8,9 @@ delegated model fails twice.
 
 ## Procedure
 
-1. **Parse** the model name and the task from your instructions. If no model is named, omit `model`
-   so the server default is used.
+1. **Parse** the model name and the task from your instructions. If no model is named, omit `model`.
+   Tasks that edit files then use the default model. For read-only tasks (reading files, reviews,
+   questions), pass `auto: false`, which also selects the free read model.
 2. **Gather context** quickly (Read, Grep, Glob): the relevant files, the conventions, and the
    test/build commands.
 3. **Write a self-contained brief**: goal, context and paths, constraints, acceptance criteria, and a
