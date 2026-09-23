@@ -24,9 +24,11 @@ a manual install they are `mcp__opencode__delegate`.
 ## Picking the model
 
 - Pass what the user said: `model: "grok 4.7"`, `"kimi k3"`, `"xai grok 4.7"`. The server matches loose
-  names. Provider words help pick the provider ("from xAI" → `xai/…`, "opencode go" → `opencode-go/…`).
-- If you get an **ambiguous** error, choose from the candidates it lists. Ask the user only if their
-  intent is unclear, for example the same model is offered by two providers and they named neither.
+  names. If a model is offered by several providers, the model maker's own provider wins over resellers
+  like `opencode-go`, so "grok 4.7" goes to `xai/grok-4.7`. A provider word in the name overrides this
+  ("opencode-go grok 4.7" → `opencode-go/…`). Include the provider word only when the user names one.
+- If you get an **ambiguous** error, the name matched several different models. Choose from the
+  candidates it lists, and ask the user only if their intent is unclear.
 - For a reasoning variant, add `#variant`, e.g. `"xai/grok-4.7#high"`.
 - If you omit `model`, the server uses `OPENCODE_DELEGATE_DEFAULT_MODEL`, or opencode's own default.
 

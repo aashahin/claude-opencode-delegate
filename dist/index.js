@@ -21525,7 +21525,8 @@ var config2 = {
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
   timeoutSec: int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
   maxOutputChars: int2(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
-  defaultCwd: process.env.OPENCODE_DELEGATE_CWD || process.cwd()
+  defaultCwd: process.env.OPENCODE_DELEGATE_CWD || process.cwd(),
+  preferredProviders: (process.env.OPENCODE_DELEGATE_PREFERRED_PROVIDERS ?? "").split(",").map((p) => p.trim().toLowerCase()).filter(Boolean)
 };
 
 // src/delegate.ts
@@ -21737,7 +21738,34 @@ var STOPWORDS = new Set(["use", "using", "with", "from", "in", "on", "via", "the
 function tokenize(s) {
   return s.toLowerCase().replace(/[^a-z0-9.]+/g, " ").split(" ").map((t) => t.replace(/^\.+|\.+$/g, "")).filter((t) => t && !STOPWORDS.has(t));
 }
-function resolveModel(query, models) {
+var AGGREGATORS = new Set([
+  "opencode",
+  "opencode-go",
+  "openrouter",
+  "requesty",
+  "vercel",
+  "zenmux",
+  "github-copilot",
+  "together",
+  "fireworks",
+  "groq",
+  "deepinfra",
+  "nebius",
+  "chutes",
+  "huggingface"
+]);
+function providerRank(provider, preferred = config2.preferredProviders) {
+  const p = provider.toLowerCase();
+  const i = preferred.indexOf(p);
+  if (i >= 0)
+    return i;
+  return preferred.length + (AGGREGATORS.has(p) ? 1 : 0);
+}
+var splitId = (id) => {
+  const i = id.indexOf("/");
+  return { provider: id.slice(0, i), name: id.slice(i + 1).toLowerCase() };
+};
+function resolveModel(query, models, preferred = config2.preferredProviders) {
   const [base = "", variant] = query.trim().split("#", 2);
   const withVariant = (m) => variant ? `${m}#${variant}` : m;
   const exact = models.find((m) => m.toLowerCase() === base.toLowerCase());
@@ -21769,8 +21797,15 @@ function resolveModel(query, models) {
     return { ok: false, reason: `no opencode model matches '${query}'`, candidates: [] };
   const hasVersion = tokens.some(isVersion);
   const tied = scored.filter((s) => s.score === best.score && (!hasVersion || s.extras === best.extras));
-  if (tied.length > 1)
+  if (tied.length > 1) {
+    const names = new Set(tied.map((t) => splitId(t.id).name));
+    if (names.size === 1) {
+      const ranked = tied.map((t) => ({ id: t.id, rank: providerRank(splitId(t.id).provider, preferred) })).sort((a, b) => a.rank - b.rank);
+      if (ranked[0].rank < ranked[1].rank)
+        return { ok: true, model: withVariant(ranked[0].id), exact: false };
+    }
     return { ok: false, reason: `'${query}' is ambiguous`, candidates: tied.map((t) => t.id) };
+  }
   return { ok: true, model: withVariant(best.id), exact: false };
 }
 async function resolveModelOrThrow(query) {

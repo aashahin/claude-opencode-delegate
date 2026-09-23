@@ -94,11 +94,14 @@ Talk to Claude normally:
 You can use exact ids (`opencode-go/grok-4.7`) or loose names (`grok 4.7`, `kimi k3`,
 `deepseek v4 flash`).
 
-- Provider words decide between providers. "grok 4.7 from xAI" resolves to `xai/grok-4.7`, and
-  "opencode-go grok 4.7" resolves to `opencode-go/grok-4.7`.
+- If the same model is offered by several providers, the model maker's own provider wins over
+  resellers such as `opencode-go`, `opencode`, and `openrouter`. So `grok 4.7` resolves to
+  `xai/grok-4.7`.
+- A provider word in the name overrides that, so "opencode-go grok 4.7" resolves to
+  `opencode-go/grok-4.7`. To set your own order, use `OPENCODE_DELEGATE_PREFERRED_PROVIDERS`.
 - A version you name must match exactly, so `grok 4.7` never silently becomes 4.6.
-- If a name is ambiguous, you get a list of candidates instead of a guess. For example, `mimo` or
-  `grok 4.7` returns candidates when two providers offer that model.
+- If a name matches several different models, you get a list of candidates instead of a guess. For
+  example, `mimo` matches several MiMo models.
 - Add `#variant` for a reasoning variant: `xai/grok-4.7#high`.
 
 ### Tools
@@ -142,6 +145,7 @@ conflict.
 | `OPENCODE_DELEGATE_TIMEOUT` | `1800` | Seconds before a run is killed. |
 | `OPENCODE_DELEGATE_MAX_OUTPUT` | `40000` | Maximum number of response characters returned to Claude. |
 | `OPENCODE_DELEGATE_CWD` | the server's cwd | Base directory for `cwd`. |
+| `OPENCODE_DELEGATE_PREFERRED_PROVIDERS` | *(none)* | Comma-separated provider order used when a model is offered by several providers, e.g. `xai,opencode-go`. Without it, the model maker's own provider beats resellers. |
 
 ## Development
 

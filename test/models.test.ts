@@ -69,8 +69,23 @@ test("family name without version lists candidates", () => {
   expect(pick("mimo")).toContain("ambiguous");
 });
 
-test("same model from two providers is ambiguous without a provider hint", () => {
-  const r = resolveModel("grok 4.7", MODELS);
-  expect(r.ok).toBe(false);
-  if (!r.ok) expect(r.candidates.sort()).toEqual(["opencode-go/grok-4.7", "xai/grok-4.7"]);
+describe("same model from several providers", () => {
+  test("direct provider beats aggregators", () => {
+    expect(pick("grok 4.7")).toBe("xai/grok-4.7");
+    expect(pick("grok-4.7#high")).toBe("xai/grok-4.7#high");
+  });
+  test("a provider hint in the query still wins", () => {
+    expect(pick("opencode-go grok 4.7")).toBe("opencode-go/grok-4.7");
+  });
+  test("OPENCODE_DELEGATE_PREFERRED_PROVIDERS order wins", () => {
+    const r = resolveModel("grok 4.7", MODELS, ["opencode-go"]);
+    expect(r.ok && r.model).toBe("opencode-go/grok-4.7");
+  });
+  test("two aggregators with no preference stay ambiguous", () => {
+    const r = resolveModel("foo 1", ["opencode/foo-1", "openrouter/foo-1"], []);
+    expect(r.ok).toBe(false);
+  });
+  test("different models are never auto-picked by provider", () => {
+    expect(pick("mimo")).toContain("ambiguous");
+  });
 });
