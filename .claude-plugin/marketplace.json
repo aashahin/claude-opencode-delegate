@@ -1,0 +1,14 @@
+{
+  "name": "claude-opencode-delegate",
+  "owner": { "name": "aashahin", "url": "https://github.com/aashahin" },
+  "metadata": { "description": "Use OpenCode models from Claude Code." },
+  "plugins": [
+    {
+      "name": "opencode-delegate",
+      "source": "./",
+      "description": "Delegate tasks from Claude to any OpenCode model while Claude stays the orchestrator.",
+      "version": "0.1.0",
+      "category": "development"
+    }
+  ]
+}

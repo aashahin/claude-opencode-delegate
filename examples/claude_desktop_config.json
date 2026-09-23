@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "/home/YOU/.bun/bin/bun",
+      "args": ["/home/YOU/path/to/claude-opencode-delegate/dist/index.js"],
+      "env": {
+        "OPENCODE_DELEGATE_CWD": "/home/YOU/projects/my-app",
+        "OPENCODE_DELEGATE_DEFAULT_MODEL": "opencode-go/kimi-k3"
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "claude-opencode-delegate",
+  "version": "0.1.0",
+  "description": "MCP server + Claude Code plugin that lets Claude delegate tasks to any OpenCode model (Grok, Kimi, GLM, Qwen, DeepSeek…) while staying the orchestrator.",
+  "type": "module",
+  "license": "MIT",
+  "author": "aashahin",
+  "repository": { "type": "git", "url": "git+https://github.com/aashahin/claude-opencode-delegate.git" },
+  "keywords": ["claude", "claude-code", "claude-desktop", "mcp", "opencode", "subagent", "delegate"],
+  "bin": { "claude-opencode-delegate": "dist/index.js" },
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "engines": { "bun": ">=1.1" },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test && bun run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
