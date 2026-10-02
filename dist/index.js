@@ -21634,7 +21634,7 @@ function runOpencode(o) {
   return new Promise((resolve) => {
     const child = spawn(config2.bin, buildArgs(o), {
       cwd: o.cwd,
-      env: process.env,
+      env: o.cwd ? { ...process.env, PWD: o.cwd } : process.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     let buf = "";

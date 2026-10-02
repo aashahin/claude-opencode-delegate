@@ -122,7 +122,8 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(config.bin, buildArgs(o), {
       cwd: o.cwd,
-      env: process.env,
+      // opencode v2 `run` resolves its directory from $PWD before process.cwd(), so keep them in sync.
+      env: o.cwd ? { ...process.env, PWD: o.cwd } : process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let buf = "";
