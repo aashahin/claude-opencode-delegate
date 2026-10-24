@@ -33,16 +33,45 @@ describe("EventCollector", () => {
     c.push("plain output");
     expect(c.text).toBe("plain output");
   });
+  test("rejects malformed event shapes and mixed sessions", () => {
+    expect(() => new EventCollector().push("null")).toThrow("event object");
+    expect(() => new EventCollector().push('{"type":"tool_use","sessionID":"s","part":{}}')).toThrow("tool event");
+    const c = new EventCollector();
+    c.push('{"type":"text","sessionID":"one","part":{"text":"hello"}}');
+    expect(() => c.push('{"type":"text","sessionID":"two","part":{"text":"other"}}')).toThrow("mixed");
+  });
+  test("rejects invalid usage counters", () => {
+    expect(() => new EventCollector().push('{"type":"step_finish","part":{"tokens":{"input":"bad"}}}')).toThrow("usage");
+  });
 });
 
 describe("buildArgs", () => {
   test("full options", () => {
     expect(
       buildArgs({ prompt: "-do it", model: "a/b", agent: "build", sessionId: "ses_1", fork: true, auto: true, title: "t", files: ["/x"] }),
-    ).toEqual(["run", "--format", "json", "--model", "a/b", "--agent", "build", "--session", "ses_1", "--fork", "--auto", "--title", "t", "--file", "/x", "--", "-do it"]);
+    ).toEqual([
+      "run",
+      "--standalone",
+      "--format",
+      "json",
+      "--model",
+      "a/b",
+      "--agent",
+      "build",
+      "--session",
+      "ses_1",
+      "--fork",
+      "--auto",
+      "--title",
+      "t",
+      "--file",
+      "/x",
+      "--",
+      "-do it",
+    ]);
   });
   test("minimal", () => {
-    expect(buildArgs({ prompt: "hi" })).toEqual(["run", "--format", "json", "--", "hi"]);
+    expect(buildArgs({ prompt: "hi" })).toEqual(["run", "--standalone", "--format", "json", "--", "hi"]);
   });
   test("fork without a session is dropped", () => {
     expect(buildArgs({ prompt: "hi", fork: true })).not.toContain("--fork");

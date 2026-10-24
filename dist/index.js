@@ -21484,7 +21484,7 @@ class StdioServerTransport {
 }
 
 // src/index.ts
-import { resolve as resolve2 } from "path";
+import { resolve as resolve4 } from "path";
 
 // src/config.ts
 import { existsSync } from "fs";
@@ -21524,29 +21524,224 @@ function int2(v, dflt) {
   const n = Number.parseInt(v ?? "", 10);
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
+function aliases(value) {
+  const entries = JSON.parse(value || "{}");
+  if (!entries || typeof entries !== "object" || Array.isArray(entries) || Object.values(entries).some((v) => typeof v !== "string" || !/^[^\s/]+\/\S+$/.test(v))) {
+    throw new Error("OPENCODE_DELEGATE_MODEL_ALIASES must map aliases to exact provider/model IDs");
+  }
+  return entries;
+}
 var config2 = {
   bin: resolveBin(),
   defaultModel: model(process.env.OPENCODE_DELEGATE_DEFAULT_MODEL, "opencode-go/muse-spark-1.3-contributor"),
   readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
-  timeoutSec: int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
+  timeoutSec: Math.min(int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800), 86400),
   maxOutputChars: int2(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
+  maxCaptureBytes: int2(process.env.OPENCODE_DELEGATE_MAX_CAPTURE, 1024 * 1024),
+  helperTimeoutSec: Math.min(int2(process.env.OPENCODE_DELEGATE_HELPER_TIMEOUT, 30), 86400),
+  maxTasks: int2(process.env.OPENCODE_DELEGATE_MAX_TASKS, 4),
+  killGraceMs: 1000,
+  stateDir: process.env.OPENCODE_DELEGATE_STATE_DIR || undefined,
+  modelAliases: aliases(process.env.OPENCODE_DELEGATE_MODEL_ALIASES),
+  allowedModels: (process.env.OPENCODE_DELEGATE_ALLOWED_MODELS ?? "").split(",").map((v) => v.trim()).filter(Boolean),
   defaultCwd: process.env.OPENCODE_DELEGATE_CWD || process.cwd(),
   preferredProviders: (process.env.OPENCODE_DELEGATE_PREFERRED_PROVIDERS ?? "").split(",").map((p) => p.trim().toLowerCase()).filter(Boolean)
 };
 
 // src/delegate.ts
-import { spawnSync } from "child_process";
-import { existsSync as existsSync2 } from "fs";
-import { isAbsolute, resolve } from "path";
+import { realpath, stat } from "fs/promises";
+import { isAbsolute as isAbsolute2, resolve as resolve3 } from "path";
+
+// src/process.ts
+import { spawn } from "child_process";
+var active = new Set;
+function abortError(signal) {
+  return signal?.reason instanceof Error ? signal.reason : new Error("cancelled");
+}
+function checkAbort(signal) {
+  if (signal?.aborted)
+    throw abortError(signal);
+}
+function send(child, signal) {
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
+    else
+      child.kill(signal);
+  } catch (e) {
+    if (e.code !== "ESRCH")
+      throw e;
+  }
+}
+function stopProcesses() {
+  for (const stop of active)
+    stop();
+}
+function runProcess(bin, args, o = {}) {
+  checkAbort(o.signal);
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      cwd: o.cwd,
+      env: { ...process.env, ...o.env, ...o.cwd ? { PWD: o.cwd } : {} },
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const maxBytes = o.maxBytes ?? config2.maxCaptureBytes;
+    let stdout = "", stderr = "", buffer = "";
+    let bytes = 0, timedOut = false, error;
+    let stopped = false, closed = false, reaped = false;
+    let code = null;
+    let forceTimer;
+    let closeTimer;
+    let timer;
+    const finish = () => {
+      if (!closed || !reaped)
+        return;
+      if (timer)
+        clearTimeout(timer);
+      if (forceTimer)
+        clearTimeout(forceTimer);
+      if (closeTimer)
+        clearTimeout(closeTimer);
+      o.signal?.removeEventListener("abort", cancel);
+      active.delete(stop);
+      resolve({ code, stdout, stderr, error, timedOut });
+    };
+    const force = () => {
+      try {
+        send(child, "SIGKILL");
+      } catch (e) {
+        error ??= String(e);
+      }
+      reaped = true;
+      closeTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        closed = true;
+        finish();
+      }, 1000);
+      finish();
+    };
+    const stop = () => {
+      if (stopped)
+        return;
+      stopped = true;
+      try {
+        send(child, "SIGINT");
+      } catch (e) {
+        error ??= String(e);
+      }
+      forceTimer = setTimeout(force, config2.killGraceMs);
+    };
+    const cancel = () => {
+      error ??= abortError(o.signal).message;
+      stop();
+    };
+    active.add(stop);
+    o.signal?.addEventListener("abort", cancel, { once: true });
+    if (o.signal?.aborted)
+      cancel();
+    timer = setTimeout(() => {
+      timedOut = true;
+      error ??= "process timed out";
+      stop();
+    }, o.timeoutMs ?? config2.helperTimeoutSec * 1000);
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      if (stopped)
+        return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > maxBytes) {
+        error = `stdout exceeds ${maxBytes} bytes`;
+        stop();
+        return;
+      }
+      if (!o.onLine) {
+        stdout += chunk;
+        return;
+      }
+      buffer += chunk;
+      let i;
+      while ((i = buffer.indexOf(`
+`)) >= 0) {
+        const line = buffer.slice(0, i);
+        buffer = buffer.slice(i + 1);
+        try {
+          o.onLine(line);
+        } catch (e) {
+          error = String(e);
+          stop();
+          break;
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr = (stderr + chunk).slice(-8000);
+    });
+    child.on("error", (e) => {
+      error = `failed to start '${bin}': ${e.message}`;
+    });
+    child.on("close", (exitCode) => {
+      code = exitCode;
+      closed = true;
+      if (buffer && !error) {
+        try {
+          o.onLine?.(buffer);
+        } catch (e) {
+          error = String(e);
+        }
+      }
+      if (!stopped) {
+        try {
+          send(child, "SIGKILL");
+        } catch {}
+        reaped = true;
+      }
+      finish();
+    });
+  });
+}
+
+// src/permissions.ts
+var REVIEW_AGENT = "opencode-delegate-review";
+var READ_ACTIONS = ["read", "glob", "grep"];
+function reviewEnvironment(env = process.env) {
+  const original = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
+  if (!original || typeof original !== "object" || Array.isArray(original)) {
+    throw new Error("OPENCODE_CONFIG_CONTENT must be a JSON object");
+  }
+  const policies = [
+    { action: "tool.use", resource: "*", effect: "deny" },
+    ...READ_ACTIONS.map((action) => ({ action: "tool.use", resource: `${action}:*`, effect: "allow" })),
+    ...original.policies ?? []
+  ];
+  return {
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      ...original,
+      policies,
+      agents: {
+        ...original.agents,
+        [REVIEW_AGENT]: {
+          mode: "primary",
+          system: "Review and explain the requested code. Use only read, glob and grep. Do not modify files or run commands.",
+          permissions: [
+            { action: "*", resource: "*", effect: "deny" },
+            ...READ_ACTIONS.map((action) => ({ action, resource: "*", effect: "allow" }))
+          ]
+        }
+      }
+    })
+  };
+}
 
 // src/opencode.ts
-import { spawn } from "child_process";
 function buildArgs(o) {
-  const args = ["run", "--format", "json"];
+  const args = ["run", "--standalone", "--format", "json"];
   if (o.model)
     args.push("--model", o.model);
-  if (o.agent)
+  if (o.mode === "read-only")
+    args.push("--agent", REVIEW_AGENT);
+  else if (o.agent)
     args.push("--agent", o.agent);
   if (o.sessionId)
     args.push("--session", o.sessionId);
@@ -21554,7 +21749,7 @@ function buildArgs(o) {
     args.push("--continue");
   if (o.fork && (o.sessionId || o.continueLast))
     args.push("--fork");
-  if (o.auto)
+  if (o.auto && o.mode !== "read-only")
     args.push("--auto");
   if (o.title)
     args.push("--title", o.title);
@@ -21584,25 +21779,41 @@ class EventCollector {
       this.raw.push(trimmed);
       return;
     }
+    if (!e || typeof e !== "object" || Array.isArray(e))
+      throw new Error("invalid OpenCode event object");
+    if (e.sessionID !== undefined && typeof e.sessionID !== "string")
+      throw new Error("invalid OpenCode session ID");
+    if (e.sessionID && this.sessionId && this.sessionId !== e.sessionID)
+      throw new Error("mixed OpenCode session IDs");
     if (e.sessionID && !this.sessionId)
       this.sessionId = e.sessionID;
     const p = e.part ?? {};
     switch (e.type) {
       case "text":
-        if (typeof p.text === "string")
+        if (typeof p.text !== "string")
+          throw new Error("invalid OpenCode text event");
+        if (p.text.trim())
           this.texts.push(p.text);
         break;
       case "tool_use":
+        if (typeof p.tool !== "string" || typeof p.state?.status !== "string")
+          throw new Error("invalid OpenCode tool event");
         this.toolCalls.push({
           tool: p.tool,
           status: p.state?.status,
           title: p.state?.title,
-          input: p.state?.input
+          input: p.state?.input,
+          error: p.state?.error
         });
         break;
       case "step_finish": {
         this.steps++;
         const t = p.tokens ?? {};
+        for (const value of [t.input, t.output, t.reasoning, t.cache?.read, t.cache?.write, p.cost]) {
+          if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+            throw new Error("invalid OpenCode usage event");
+          }
+        }
         this.tokens.input += t.input ?? 0;
         this.tokens.output += t.output ?? 0;
         this.tokens.reasoning += t.reasoning ?? 0;
@@ -21628,112 +21839,83 @@ function errorMessage(err) {
   const ref = err?.data?.ref ? ` (ref ${err.data.ref})` : "";
   return typeof msg === "string" ? msg + ref : JSON.stringify(err);
 }
-function runOpencode(o) {
+async function runOpencode(o) {
   const started = Date.now();
   const collector = new EventCollector;
-  return new Promise((resolve) => {
-    const child = spawn(config2.bin, buildArgs(o), {
-      cwd: o.cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let buf = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-    const kill = () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 3000).unref();
-      }
-    };
-    const timer = o.timeoutMs ? setTimeout(() => {
-      timedOut = true;
-      kill();
-    }, o.timeoutMs) : undefined;
-    o.signal?.addEventListener("abort", kill, { once: true });
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
-      buf += chunk;
-      let i;
-      while ((i = buf.indexOf(`
-`)) >= 0) {
-        collector.push(buf.slice(0, i));
-        buf = buf.slice(i + 1);
-      }
-    });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => {
-      stderr = (stderr + chunk).slice(-8000);
-    });
-    const finish = (exitCode, spawnError) => {
-      if (settled)
-        return;
-      settled = true;
-      if (timer)
-        clearTimeout(timer);
-      collector.push(buf);
-      const errors = [...collector.errors];
-      if (spawnError)
-        errors.push(spawnError);
-      if (timedOut)
-        errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
-      else if (o.signal?.aborted)
-        errors.push("cancelled");
-      if (exitCode && !errors.length)
-        errors.push(stderr.trim().split(`
+  const r = await runProcess(config2.bin, buildArgs(o), {
+    cwd: o.cwd,
+    env: o.mode === "read-only" ? reviewEnvironment() : undefined,
+    signal: o.signal,
+    timeoutMs: o.timeoutMs,
+    onLine: (line) => {
+      const previous = collector.sessionId;
+      collector.push(line);
+      if (collector.sessionId && !previous)
+        o.onSession?.(collector.sessionId);
+    }
+  });
+  const errors = [...collector.errors];
+  if (r.error)
+    errors.push(r.error);
+  if (r.timedOut)
+    errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
+  if (o.signal?.aborted && !r.error)
+    errors.push("cancelled");
+  if (r.code !== 0 && !errors.length)
+    errors.push(r.stderr.trim().split(`
 `).slice(-5).join(`
-`) || `exit code ${exitCode}`);
-      resolve({
-        ok: exitCode === 0 && !errors.length,
-        sessionId: collector.sessionId,
-        text: collector.text,
-        toolCalls: collector.toolCalls,
-        tokens: collector.tokens,
-        cost: collector.cost,
-        steps: collector.steps,
-        error: errors.join("; ") || undefined,
-        exitCode,
-        timedOut,
-        durationMs: Date.now() - started
-      });
-    };
-    child.on("error", (err) => finish(null, `failed to start '${config2.bin}': ${err.message}`));
-    child.on("close", (code) => finish(code));
-  });
+`) || `exit code ${r.code}`);
+  if (!errors.length && (!collector.sessionId || !collector.texts.length && !collector.steps && !collector.toolCalls.length || collector.raw.length)) {
+    errors.push("invalid OpenCode JSON output: no recognized session result or non-JSON stdout");
+  }
+  return {
+    ok: r.code === 0 && !errors.length,
+    sessionId: collector.sessionId,
+    text: collector.text,
+    toolCalls: collector.toolCalls,
+    tokens: collector.tokens,
+    cost: collector.cost,
+    steps: collector.steps,
+    error: errors.join("; ") || undefined,
+    exitCode: r.code,
+    timedOut: r.timedOut,
+    durationMs: Date.now() - started
+  };
 }
-function execText(args, cwd) {
-  return new Promise((resolve) => {
-    const child = spawn(config2.bin, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (c) => stdout += c);
-    child.stderr.setEncoding("utf8").on("data", (c) => stderr += c);
-    child.on("error", (err) => resolve({ code: null, stdout, stderr: err.message }));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
-  });
+async function execText(args, cwd, signal) {
+  const r = await runProcess(config2.bin, args, { cwd, signal });
+  if (r.error)
+    throw new Error(r.error);
+  return { code: r.code, stdout: r.stdout, stderr: r.stderr };
 }
 
 // src/models.ts
+import { resolve } from "path";
 var CACHE_MS = 5 * 60 * 1000;
 var cache;
-async function listModels(refresh = false) {
-  if (!refresh && cache && Date.now() - cache.at < CACHE_MS)
+async function listModels(refresh = false, signal, cwd = config2.defaultCwd) {
+  checkAbort(signal);
+  cwd = resolve(cwd);
+  const key = JSON.stringify([config2.bin, cwd, process.env.OPENCODE_CONFIG_CONTENT]);
+  if (!refresh && cache?.key === key && Date.now() - cache.at < CACHE_MS)
     return cache.models;
   let best = [];
   let prev;
   for (let i = 0;i < 4; i++) {
-    const { code, stdout, stderr } = await execText(["models"]);
+    const { code, stdout, stderr } = await execText(["models", "--standalone"], cwd, signal);
+    checkAbort(signal);
     if (code !== 0)
       throw new Error(`'opencode models' failed: ${stderr.trim() || `exit ${code}`}`);
     const models = parseModels(stdout);
     if (models.length > best.length)
       best = models;
-    if (prev && models.length > 0 && models.length === prev.length)
+    if (prev && models.length > 0 && models.length === prev.length && models.every((m, i) => m === prev[i]))
       break;
     prev = models;
   }
   if (!best.length)
     throw new Error("'opencode models' returned no models \u2014 is a provider configured? Try `opencode auth`.");
-  cache = { at: Date.now(), models: best };
+  cache = { at: Date.now(), key, models: best };
   return best;
 }
 function parseModels(stdout) {
@@ -21777,18 +21959,31 @@ function resolveModel(query, models, preferred = config2.preferredProviders) {
   const exact = models.find((m) => m.toLowerCase() === base.toLowerCase());
   if (exact)
     return { ok: true, model: withVariant(exact), exact: true };
+  if (base.includes("/"))
+    return { ok: false, reason: `unknown exact model id '${base}'`, candidates: [] };
   const tokens = tokenize(base);
   if (!tokens.length)
     return { ok: false, reason: `empty model name '${query}'`, candidates: [] };
   const isVersion = (t) => /\d/.test(t);
+  const providers = [...new Set(models.map((id) => splitId(id).provider.toLowerCase()))];
+  const words = base.toLowerCase().split(/\s+/);
+  const providerHints = providers.filter((p) => {
+    const i = words.indexOf(p);
+    return i >= 0 && !(p === "opencode" && i > 0 && ["in", "via", "using", "with"].includes(words[i - 1]));
+  });
+  if (providerHints.length > 1)
+    return { ok: false, reason: "conflicting provider hints", candidates: [] };
+  const explicitProvider = providerHints[0];
+  const providerTokens = new Set(explicitProvider ? tokenize(explicitProvider) : []);
+  const nameQuery = tokens.filter((t) => !providerTokens.has(t));
   const scored = models.map((id) => {
     const lower = id.toLowerCase();
     const name = lower.slice(lower.indexOf("/") + 1);
     const idTokens = new Set(tokenize(lower));
     const nameTokens = tokenize(name);
-    if (!tokens.filter(isVersion).every((t) => name.includes(t)))
+    if (explicitProvider && splitId(id).provider.toLowerCase() !== explicitProvider)
       return;
-    if (!tokens.some((t) => name.includes(t)))
+    if (!nameQuery.length || !nameQuery.every((t) => nameTokens.includes(t)))
       return;
     let score = 0;
     for (const t of tokens) {
@@ -21814,8 +22009,10 @@ function resolveModel(query, models, preferred = config2.preferredProviders) {
   }
   return { ok: true, model: withVariant(best.id), exact: false };
 }
-async function resolveModelOrThrow(query) {
-  const models = await listModels();
+async function resolveModelOrThrow(query, signal, cwd) {
+  query = Object.hasOwn(config2.modelAliases, query) ? config2.modelAliases[query] : query;
+  const models = await listModels(false, signal, cwd);
+  checkAbort(signal);
   const r = resolveModel(query, models);
   if (r.ok)
     return r.model;
@@ -21823,40 +22020,230 @@ async function resolveModelOrThrow(query) {
   throw new Error(`${r.reason}.${alts.length ? ` Did you mean one of: ${alts.slice(0, 20).join(", ")}?` : ""} Use list_models to see all models.`);
 }
 
-// src/delegate.ts
-function gitStatus(cwd) {
-  const r = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd, encoding: "utf8" });
-  if (r.status !== 0)
-    return;
-  return new Set(r.stdout.split(`
-`).filter(Boolean));
+// src/git.ts
+import { createHash } from "crypto";
+import { createReadStream } from "fs";
+import { lstat, mkdtemp, readlink } from "fs/promises";
+import { tmpdir } from "os";
+import { isAbsolute, join as join2, relative, resolve as resolve2 } from "path";
+async function git(cwd, args, signal) {
+  const r = await runProcess("git", ["-C", cwd, ...args], { cwd, signal });
+  if (r.error)
+    throw new Error(r.error);
+  if (r.code !== 0)
+    throw new Error(r.stderr.trim() || `git exited ${r.code}`);
+  return r.stdout;
 }
-async function delegate(input, signal) {
-  const cwd = resolve(config2.defaultCwd, input.cwd ?? ".");
-  if (!existsSync2(cwd))
-    throw new Error(`cwd does not exist: ${cwd}`);
-  const auto = input.auto ?? config2.auto;
-  const query = input.model ?? (auto ? config2.defaultModel : config2.readModel ?? config2.defaultModel);
-  const model = query ? await resolveModelOrThrow(query) : undefined;
-  const files = input.files?.map((f) => isAbsolute(f) ? f : resolve(cwd, f));
-  const before = gitStatus(cwd);
-  const result = await runOpencode({
-    prompt: input.prompt,
-    model,
-    cwd,
-    agent: input.agent,
-    files,
-    sessionId: input.session_id,
-    continueLast: input.continue,
-    fork: input.fork,
-    auto,
-    title: input.title,
-    timeoutMs: (input.timeout_s ?? config2.timeoutSec) * 1000,
-    signal
+async function gitRoot(cwd, signal) {
+  const r = await runProcess("git", ["rev-parse", "--show-toplevel"], { cwd, signal });
+  if (r.error)
+    throw new Error(r.error);
+  if (r.code !== 0) {
+    if (r.stderr.includes("not a git repository"))
+      return;
+    throw new Error(r.stderr.trim() || "cannot determine git root");
+  }
+  return r.stdout.trim();
+}
+function statusPaths(stdout) {
+  const records = stdout.split("\x00");
+  const paths = new Set;
+  for (let i = 0;i < records.length; i++) {
+    const entry = records[i];
+    if (!entry)
+      continue;
+    paths.add(entry.slice(3));
+    if (/[RC]/.test(entry.slice(0, 2))) {
+      const source = records[++i];
+      if (source)
+        paths.add(source);
+    }
+  }
+  return [...paths];
+}
+async function fingerprint(root, file, index, signal) {
+  const path = resolve2(root, file);
+  const rel = relative(root, path);
+  if (isAbsolute(rel) || rel === ".." || rel.startsWith("../") || rel.startsWith("..\\"))
+    throw new Error("git path escapes root");
+  checkAbort(signal);
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink())
+      return `${index}:symlink:${await readlink(path)}`;
+    if (!stat.isFile())
+      return `${index}:mode:${stat.mode}`;
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(path, { signal }))
+      hash.update(chunk);
+    return `${index}:${stat.mode}:${hash.digest("hex")}`;
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return `${index}:missing`;
+    throw e;
+  }
+}
+async function snapshot(root, signal, include = []) {
+  const head = await git(root, ["rev-parse", "--verify", "HEAD"], signal).catch((e) => {
+    checkAbort(signal);
+    if (String(e).includes("Needed a single revision") || String(e).includes("unknown revision"))
+      return "";
+    throw e;
   });
-  const after = before && gitStatus(cwd);
-  const changedFiles = after ? [...after].filter((l) => !before.has(l)) : undefined;
-  return { model, cwd, result, changedFiles };
+  const paths = new Set([...statusPaths(await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], signal)), ...include]);
+  const index = new Map;
+  if (paths.size) {
+    const entries = await git(root, ["ls-files", "--stage", "-z"], signal);
+    for (const entry of entries.split("\x00")) {
+      const tab = entry.indexOf("\t");
+      if (tab < 0)
+        continue;
+      const file = entry.slice(tab + 1);
+      index.set(file, (index.get(file) ?? "") + entry.slice(0, tab) + `
+`);
+    }
+  }
+  const files = new Map;
+  for (const file of paths)
+    files.set(file, await fingerprint(root, file, index.get(file) ?? "", signal));
+  return { root, head: head.trim(), files };
+}
+async function changedPaths(before, signal) {
+  const after = await snapshot(before.root, signal, [...before.files.keys()]);
+  const changed = new Set;
+  for (const [file, hash] of after.files) {
+    if (before.files.get(file) !== hash)
+      changed.add(file);
+  }
+  if (before.head && after.head && before.head !== after.head) {
+    const paths = await git(before.root, ["diff", "--name-only", "-z", before.head, after.head], signal);
+    for (const file of paths.split("\x00").filter(Boolean))
+      changed.add(file);
+  } else if (!before.head && after.head) {
+    for (const file of (await git(before.root, ["ls-tree", "-r", "--name-only", "-z", after.head], signal)).split("\x00").filter(Boolean))
+      changed.add(file);
+  }
+  return { files: [...changed].sort(), head: after.head };
+}
+async function createWorktree(root, signal) {
+  if ((await git(root, ["status", "--porcelain=v1"], signal)).trim()) {
+    throw new Error("worktree isolation requires a clean source tree; commit/stash changes or provide an existing worktree cwd");
+  }
+  const directory = join2(await mkdtemp(join2(tmpdir(), "opencode-delegate-")), "worktree");
+  await git(root, ["worktree", "add", "--detach", directory, "HEAD"], signal);
+  return directory;
+}
+
+// src/compatibility.ts
+var cached2;
+async function checkCompatibility(signal) {
+  checkAbort(signal);
+  if (cached2?.bin === config2.bin && Date.now() - cached2.at < 300000)
+    return;
+  const r = await execText(["--version"], undefined, signal);
+  const version = /\b(?:v)?(\d+)\.(\d+)\.(\d+)\b/.exec(r.stdout);
+  if (r.code !== 0 || !version || Number(version[1]) !== 2 || Number(version[2]) < 1 || Number(version[2]) === 1 && Number(version[3]) < 4) {
+    throw new Error("unsupported OpenCode version; delegation requires >=2.1.4 <3 (tested with 2.1.4)");
+  }
+  cached2 = { bin: config2.bin, at: Date.now() };
+}
+
+// src/delegate.ts
+var locks = new Set;
+var controllers = new Set;
+function stopDelegates() {
+  for (const controller of controllers)
+    controller.abort(new Error("server shutting down"));
+}
+async function delegate(input, signal, checkpoint) {
+  checkAbort(signal);
+  if (controllers.size >= config2.maxTasks)
+    throw new Error(`maximum of ${config2.maxTasks} active delegations reached`);
+  const controller = new AbortController;
+  controllers.add(controller);
+  const duration = (input.timeout_s ?? config2.timeoutSec) * 1000;
+  const deadline = setTimeout(() => controller.abort(new Error("delegation deadline exceeded")), duration);
+  const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  const owned = new Set;
+  try {
+    const requestedCwd = await realpath(resolve3(config2.defaultCwd, input.cwd ?? "."));
+    if (!(await stat(requestedCwd)).isDirectory())
+      throw new Error("cwd must be a directory");
+    checkAbort(combined);
+    const auto = input.auto ?? config2.auto;
+    const mode = input.mode ?? (auto ? "write" : "read-only");
+    if (mode === "read-only" && input.agent)
+      throw new Error("read-only mode uses its own restricted agent; omit agent");
+    if (input.worktree && (mode === "read-only" || input.session_id || input.continue))
+      throw new Error("worktree requires a new write session; follow up using the returned cwd and session_id");
+    const root = await gitRoot(requestedCwd, combined);
+    const claim = (key) => {
+      if (locks.has(key))
+        throw new Error("another delegation owns this cwd/session; use separate worktrees");
+      locks.add(key);
+      owned.add(key);
+    };
+    if (input.session_id)
+      claim(`session:${input.session_id}`);
+    const dirLock = root ?? requestedCwd;
+    claim(dirLock);
+    let cwd = requestedCwd;
+    let activeRoot = root;
+    await checkCompatibility(combined);
+    const query = input.model ?? (mode === "write" ? config2.defaultModel : config2.readModel ?? config2.defaultModel);
+    if (!query && config2.allowedModels.length)
+      throw new Error("an explicit model is required when ALLOWED_MODELS is configured");
+    const model = query ? await resolveModelOrThrow(query, combined, cwd) : undefined;
+    if (model && config2.allowedModels.length && !config2.allowedModels.includes(model) && !config2.allowedModels.includes(model.split("#")[0])) {
+      throw new Error(`model '${model}' is not in OPENCODE_DELEGATE_ALLOWED_MODELS`);
+    }
+    checkAbort(combined);
+    if (input.worktree) {
+      if (!root)
+        throw new Error("worktree requires a git repository");
+      cwd = await createWorktree(root, combined);
+      activeRoot = cwd;
+      locks.delete(dirLock);
+      owned.delete(dirLock);
+      claim(cwd);
+    }
+    checkpoint?.({ cwd, model });
+    const files = input.files?.map((f) => isAbsolute2(f) ? f : resolve3(cwd, f));
+    const before = activeRoot ? await snapshot(activeRoot, combined) : undefined;
+    checkAbort(combined);
+    const result = await runOpencode({
+      prompt: input.prompt,
+      model,
+      cwd,
+      agent: input.agent,
+      files,
+      sessionId: input.session_id,
+      continueLast: input.continue,
+      fork: input.fork,
+      auto: mode === "write" && auto,
+      mode,
+      title: input.title,
+      timeoutMs: duration,
+      signal: combined,
+      onSession: (sessionId) => checkpoint?.({ cwd, model, sessionId })
+    });
+    const outcome = { model, cwd, requestedCwd, mode, result, gitRoot: activeRoot, baseHead: before?.head };
+    if (before) {
+      try {
+        const changes = await changedPaths(before, AbortSignal.timeout(config2.helperTimeoutSec * 1000));
+        outcome.changedFiles = changes.files;
+        outcome.finalHead = changes.head;
+      } catch (e) {
+        outcome.changesError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return outcome;
+  } finally {
+    for (const key of owned)
+      locks.delete(key);
+    clearTimeout(deadline);
+    controllers.delete(controller);
+  }
 }
 function truncate(s, max) {
   if (s.length <= max)
@@ -21868,12 +22255,19 @@ function truncate(s, max) {
 function formatOutcome(o) {
   const r = o.result;
   const lines = [
-    `status: ${r.ok ? "ok" : "error"}`,
+    `status: ${r.ok ? "ok" : "error"} (execution only; review/tests determine task acceptance)`,
     `model: ${o.model ?? "(opencode default)"}`,
     `session_id: ${r.sessionId ?? "(none)"}`,
     `cwd: ${o.cwd}`,
+    `mode: ${o.mode ?? "write"}`,
     `duration: ${(r.durationMs / 1000).toFixed(1)}s, steps: ${r.steps}, tokens in/out: ${r.tokens.input + r.tokens.cacheRead}/${r.tokens.output}${r.cost ? `, cost: $${r.cost.toFixed(4)}` : ""}`
   ];
+  if (o.requestedCwd && o.requestedCwd !== o.cwd)
+    lines.push(`source cwd: ${o.requestedCwd}; isolated worktree retained for review`);
+  if (o.gitRoot)
+    lines.push(`git root: ${o.gitRoot} (reported paths are relative to this root)`);
+  if (o.baseHead !== o.finalHead && o.finalHead)
+    lines.push(`HEAD moved: ${o.baseHead || "(unborn)"} \u2192 ${o.finalHead}`);
   if (r.error)
     lines.push(`error: ${r.error}`);
   if (r.toolCalls.length) {
@@ -21881,12 +22275,15 @@ function formatOutcome(o) {
     for (const t of r.toolCalls)
       counts.set(t.tool, (counts.get(t.tool) ?? 0) + 1);
     lines.push(`tools used: ${[...counts].map(([k, v]) => `${k}\xD7${v}`).join(", ")}`);
+    for (const t of r.toolCalls.filter((t) => t.status === "error"))
+      lines.push(`tool error: ${t.tool}: ${t.error ?? "(see session transcript)"}`);
   }
-  if (o.changedFiles) {
+  if (o.changedFiles)
     lines.push(o.changedFiles.length ? `git changes:
-${o.changedFiles.map((f) => `  ${f}`).join(`
+${o.changedFiles.map((f) => `  ${JSON.stringify(f)}`).join(`
 `)}` : "git changes: none");
-  }
+  else
+    lines.push(`git changes: unavailable${o.changesError ? ` (${o.changesError})` : " (not a git repository)"}`);
   lines.push("", "--- response ---", truncate(r.text || "(no text output)", config2.maxOutputChars));
   return lines.join(`
 `);
@@ -21894,40 +22291,126 @@ ${o.changedFiles.map((f) => `  ${f}`).join(`
 
 // src/tasks.ts
 import { randomUUID } from "crypto";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { join as join3 } from "path";
 var MAX_FINISHED = 100;
-var tasks = new Map;
-function prune() {
-  const finished = [...tasks.values()].filter((t) => t.status !== "running").sort((a, b) => a.startedAt - b.startedAt);
-  for (const t of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED)))
-    tasks.delete(t.id);
+
+class TaskStore {
+  directory;
+  runner;
+  tasks = new Map;
+  constructor(directory, runner = delegate) {
+    this.directory = directory;
+    this.runner = runner;
+    if (!directory)
+      return;
+    mkdirSync(directory, { recursive: true, mode: 448 });
+    for (const file of readdirSync(directory).filter((f) => /^task_[a-f0-9-]+\.json$/.test(f))) {
+      try {
+        const saved = JSON.parse(readFileSync(join3(directory, file), "utf8"));
+        if (file !== `${saved.id}.json` || !["running", "done", "error", "cancelled"].includes(saved.status) || !saved.input)
+          continue;
+        const task = { ...saved, controller: new AbortController, promise: Promise.resolve() };
+        if (task.status === "running") {
+          task.status = "error";
+          task.finishedAt = Date.now();
+          task.error = "server restarted; execution state unknown \u2014 inspect the saved cwd/session before retrying";
+        }
+        this.tasks.set(task.id, task);
+      } catch (e) {
+        process.stderr.write(`ignoring invalid task journal '${file}': ${String(e)}
+`);
+      }
+    }
+    this.prune();
+  }
+  save(task) {
+    if (!this.directory)
+      return;
+    const { prompt: _, ...input } = task.input;
+    const record = {
+      id: task.id,
+      input: { ...input, prompt: "(prompt not persisted)" },
+      status: task.status,
+      startedAt: task.startedAt,
+      finishedAt: task.finishedAt,
+      outcome: task.outcome ? {
+        ...task.outcome,
+        result: { ...task.outcome.result, toolCalls: task.outcome.result.toolCalls.map(({ input: _, ...tool }) => tool) }
+      } : undefined,
+      error: task.error,
+      checkpoint: task.checkpoint
+    };
+    const file = join3(this.directory, `${task.id}.json`);
+    const temp = `${file}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify(record), { mode: 384 });
+    renameSync(temp, file);
+  }
+  prune() {
+    const finished = [...this.tasks.values()].filter((t) => t.status !== "running").sort((a, b) => a.startedAt - b.startedAt);
+    for (const task of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED))) {
+      this.tasks.delete(task.id);
+      if (this.directory) {
+        try {
+          unlinkSync(join3(this.directory, `${task.id}.json`));
+        } catch (e) {
+          if (e.code !== "ENOENT")
+            throw e;
+        }
+      }
+    }
+  }
+  start(input) {
+    if ([...this.tasks.values()].filter((t) => t.status === "running").length >= config2.maxTasks) {
+      throw new Error(`maximum of ${config2.maxTasks} background tasks reached`);
+    }
+    const task = {
+      id: `task_${randomUUID()}`,
+      input,
+      status: "running",
+      startedAt: Date.now(),
+      controller: new AbortController,
+      promise: Promise.resolve()
+    };
+    this.save(task);
+    this.tasks.set(task.id, task);
+    task.promise = Promise.resolve().then(() => this.runner(input, task.controller.signal, (checkpoint) => {
+      task.checkpoint = checkpoint;
+      this.save(task);
+    })).then((outcome) => {
+      task.outcome = outcome;
+      task.status = task.controller.signal.aborted ? "cancelled" : outcome.result.ok ? "done" : "error";
+    }, (e) => {
+      task.error = e instanceof Error ? e.message : String(e);
+      task.status = task.controller.signal.aborted ? "cancelled" : "error";
+    }).finally(() => {
+      task.finishedAt = Date.now();
+      try {
+        this.save(task);
+        this.prune();
+      } catch (e) {
+        task.error = `task journal failed: ${String(e)}`;
+        task.status = "error";
+      }
+    });
+    return task;
+  }
+  get(id) {
+    return this.tasks.get(id);
+  }
+  list() {
+    return [...this.tasks.values()].sort((a, b) => b.startedAt - a.startedAt);
+  }
 }
-function startTask(input) {
-  const controller = new AbortController;
-  const task = { id: `task_${randomUUID().slice(0, 8)}`, input, status: "running", startedAt: Date.now(), controller };
-  task.promise = delegate(input, controller.signal).then((outcome) => {
-    task.outcome = outcome;
-    task.status = controller.signal.aborted ? "cancelled" : outcome.result.ok ? "done" : "error";
-  }, (err) => {
-    task.error = err instanceof Error ? err.message : String(err);
-    task.status = "error";
-  }).finally(() => {
-    task.finishedAt = Date.now();
-    prune();
-  });
-  tasks.set(task.id, task);
-  return task;
-}
-function getTask(id) {
-  return tasks.get(id);
-}
-function listTasks() {
-  return [...tasks.values()].sort((a, b) => b.startedAt - a.startedAt);
-}
+var store = new TaskStore(config2.stateDir);
+var startTask = (input) => store.start(input);
+var getTask = (id) => store.get(id);
+var listTasks = () => store.list();
 async function waitTask(task, waitSec) {
   if (task.status !== "running" || waitSec <= 0)
     return;
   let timer;
-  await Promise.race([task.promise, new Promise((r) => timer = setTimeout(r, waitSec * 1000))]);
+  await Promise.race([task.promise, new Promise((r) => timer = setTimeout(r, Math.min(waitSec, 30) * 1000))]);
   clearTimeout(timer);
 }
 // package.json
@@ -21938,11 +22421,31 @@ var package_default = {
   type: "module",
   license: "MIT",
   author: "aashahin",
-  repository: { type: "git", url: "git+https://github.com/aashahin/claude-opencode-delegate.git" },
-  keywords: ["claude", "claude-code", "claude-desktop", "mcp", "opencode", "subagent", "delegate"],
-  bin: { "claude-opencode-delegate": "dist/index.js" },
-  files: ["dist", "src", "README.md", "LICENSE"],
-  engines: { bun: ">=1.1" },
+  repository: {
+    type: "git",
+    url: "git+https://github.com/aashahin/claude-opencode-delegate.git"
+  },
+  keywords: [
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "mcp",
+    "opencode",
+    "subagent",
+    "delegate"
+  ],
+  bin: {
+    "claude-opencode-delegate": "dist/index.js"
+  },
+  files: [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  engines: {
+    bun: ">=1.4.4"
+  },
   scripts: {
     start: "bun src/index.ts",
     build: "bun build src/index.ts --target=bun --outfile=dist/index.js",
@@ -21965,28 +22468,31 @@ var server = new McpServer({ name: "opencode-delegate", version: package_default
 var text = (t, isError = false) => ({ content: [{ type: "text", text: t }], isError });
 var delegateShape = {
   prompt: string2().min(1).describe("Complete, self-contained task for the opencode model. It cannot see this conversation: include goal, relevant files/paths, constraints, and acceptance criteria."),
-  model: string2().optional().describe(`opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config2.defaultModel ?? "opencode's default"} for normal tasks, ${config2.readModel ?? config2.defaultModel ?? "opencode's default"} (free) when auto is false.`),
+  model: string2().optional().describe(`opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config2.defaultModel ?? "opencode's default"} for normal tasks, ${config2.readModel ?? config2.defaultModel ?? "opencode's default"} when mode is read-only.`),
   cwd: string2().optional().describe("Working directory for the task (absolute, or relative to the server's cwd). Defaults to the current project."),
   agent: string2().optional().describe("opencode agent to use (e.g. 'build', 'plan', or a custom agent)."),
   files: array(string2()).optional().describe("Files to attach to the message."),
   session_id: string2().optional().describe("Continue an existing opencode session (returned by a previous call) for follow-ups."),
   continue: boolean2().optional().describe("Continue the most recent opencode session in cwd."),
   fork: boolean2().optional().describe("Fork the session given by session_id/continue instead of appending to it."),
-  auto: boolean2().optional().describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config2.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
+  auto: boolean2().optional().describe(`Auto-approve permissions for write mode. Default: ${config2.auto}. When mode is omitted, false selects enforced read-only mode. Use mode: 'write', auto: false to retain normal OpenCode permissions without auto-approval.`),
+  mode: _enum(["write", "read-only"]).optional().describe("read-only permits only read/glob/grep via a restricted OpenCode agent. Write mode can edit and execute commands. Defaults from auto for backward compatibility."),
+  worktree: boolean2().optional().describe("Create a retained isolated git worktree for a new write task. Source tree must be clean. Follow up with the returned cwd/session_id; no automatic merge or deletion."),
   title: string2().optional().describe("Session title shown in opencode."),
-  timeout_s: number2().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config2.timeoutSec}.`)
+  timeout_s: number2().int().positive().max(86400).optional().describe(`Total preparation/execution deadline in seconds (maximum 86400). Default: ${config2.timeoutSec}.`)
 };
 server.registerTool("list_models", {
   title: "List opencode models",
   description: "List the models available in the local opencode install, as 'provider/model' ids.",
   inputSchema: {
     filter: string2().optional().describe("Case-insensitive substring filter, e.g. 'grok' or 'opencode-go/'."),
-    refresh: boolean2().optional().describe("Bypass the 5 minute cache.")
+    refresh: boolean2().optional().describe("Bypass the 5 minute cache."),
+    cwd: string2().optional().describe("Project directory for project-specific providers/models.")
   },
   annotations: { readOnlyHint: true }
-}, async ({ filter, refresh }) => {
+}, async ({ filter, refresh, cwd }, extra) => {
   try {
-    let models = await listModels(refresh);
+    let models = await listModels(refresh, extra.signal, resolve4(config2.defaultCwd, cwd ?? "."));
     if (filter)
       models = models.filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
     return text(models.length ? models.join(`
@@ -22021,7 +22527,7 @@ server.registerTool("delegate", {
 });
 function taskSummary(t) {
   const secs = (((t.finishedAt ?? Date.now()) - t.startedAt) / 1000).toFixed(0);
-  const model = t.outcome?.model ?? t.input.model ?? "(default)";
+  const model = t.outcome?.model ?? t.checkpoint?.model ?? t.input.model ?? "(default)";
   return `${t.id}  ${t.status.padEnd(9)} ${secs}s  ${model}  ${t.input.title ?? t.input.prompt.slice(0, 60).replace(/\s+/g, " ")}`;
 }
 server.registerTool("delegate_async", {
@@ -22029,16 +22535,20 @@ server.registerTool("delegate_async", {
   description: "Same as delegate, but returns a task_id immediately while the opencode model works in the background. Use for long tasks or to run several models in parallel; then call task_result to collect output. Parallel tasks editing the same directory can conflict \u2014 give each its own cwd/worktree or non-overlapping files.",
   inputSchema: delegateShape
 }, async (input) => {
-  const t = startTask(input);
-  return text(`started ${t.id}
+  try {
+    const t = startTask(input);
+    return text(`started ${t.id}
 Call task_result with task_id="${t.id}" (optionally wait_s) to get the output.`);
+  } catch (e) {
+    return text(e instanceof Error ? e.message : String(e), true);
+  }
 });
 server.registerTool("task_result", {
   title: "Get a background opencode task's result",
   description: "Return the status/result of a delegate_async task, optionally waiting up to wait_s seconds for it to finish.",
   inputSchema: {
     task_id: string2(),
-    wait_s: number2().int().min(0).max(3600).optional().describe("Seconds to wait for completion before returning (default 0).")
+    wait_s: number2().int().min(0).max(30).optional().describe("Seconds to wait for completion before returning (default 0, maximum 30).")
   },
   annotations: { readOnlyHint: true }
 }, async ({ task_id, wait_s }) => {
@@ -22052,8 +22562,11 @@ still running \u2014 call again later or with a larger wait_s.`);
   if (t.outcome)
     return text(`task: ${t.id} (${t.status})
 ${formatOutcome(t.outcome)}`, t.status !== "done");
+  const checkpoint = t.checkpoint ? `
+cwd: ${t.checkpoint.cwd}
+session_id: ${t.checkpoint.sessionId ?? "(not recorded)"}` : "";
   return text(`task: ${t.id} (${t.status})
-error: ${t.error}`, true);
+error: ${t.error}${checkpoint}`, true);
 });
 server.registerTool("task_list", {
   title: "List background opencode tasks",
@@ -22087,11 +22600,31 @@ server.registerTool("list_sessions", {
     limit: number2().int().positive().max(100).optional().describe("Max sessions (default 20).")
   },
   annotations: { readOnlyHint: true }
-}, async ({ cwd, limit }) => {
-  const dir = resolve2(config2.defaultCwd, cwd ?? ".");
-  const r = await execText(["session", "list", "-n", String(limit ?? 20)], dir);
-  if (r.code !== 0)
-    return text(r.stderr.trim() || `exit ${r.code}`, true);
-  return text(r.stdout.trim() || "(no sessions)");
+}, async ({ cwd, limit }, extra) => {
+  const dir = resolve4(config2.defaultCwd, cwd ?? ".");
+  try {
+    const r = await execText(["session", "list", "--standalone", "--format", "json", "-n", String(limit ?? 20)], dir, extra.signal);
+    if (r.code !== 0)
+      return text(r.stderr.trim() || `exit ${r.code}`, true);
+    return text(r.stdout.trim() || "(no sessions)");
+  } catch (e) {
+    return text(e instanceof Error ? e.message : String(e), true);
+  }
 });
 await server.connect(new StdioServerTransport);
+var shuttingDown = false;
+function shutdown() {
+  if (shuttingDown)
+    return;
+  shuttingDown = true;
+  stopDelegates();
+  for (const task of listTasks())
+    if (task.status === "running")
+      task.controller.abort(new Error("server shutting down"));
+  stopProcesses();
+  server.close();
+  setTimeout(() => process.exit(0), config2.killGraceMs + 1500).unref();
+}
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+process.stdin.once("end", shutdown);

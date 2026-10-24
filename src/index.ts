@@ -4,7 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { resolve } from "node:path";
 import { z } from "zod";
 import { config } from "./config.ts";
-import { delegate, formatOutcome } from "./delegate.ts";
+import { delegate, formatOutcome, stopDelegates } from "./delegate.ts";
+import { stopProcesses } from "./process.ts";
 import { listModels } from "./models.ts";
 import { execText } from "./opencode.ts";
 import { getTask, listTasks, startTask, waitTask, type Task } from "./tasks.ts";
@@ -25,9 +26,12 @@ const delegateShape = {
     .string()
     .optional()
     .describe(
-      `opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config.defaultModel ?? "opencode's default"} for normal tasks, ${config.readModel ?? config.defaultModel ?? "opencode's default"} (free) when auto is false.`,
+      `opencode model: exact 'provider/model' id (e.g. 'xai/grok-4.7') or a loose name ('grok 4.7', 'kimi k3'). Append '#variant' for a reasoning variant. Omit to use the default: ${config.defaultModel ?? "opencode's default"} for normal tasks, ${config.readModel ?? config.defaultModel ?? "opencode's default"} when mode is read-only.`,
     ),
-  cwd: z.string().optional().describe("Working directory for the task (absolute, or relative to the server's cwd). Defaults to the current project."),
+  cwd: z
+    .string()
+    .optional()
+    .describe("Working directory for the task (absolute, or relative to the server's cwd). Defaults to the current project."),
   agent: z.string().optional().describe("opencode agent to use (e.g. 'build', 'plan', or a custom agent)."),
   files: z.array(z.string()).optional().describe("Files to attach to the message."),
   session_id: z.string().optional().describe("Continue an existing opencode session (returned by a previous call) for follow-ups."),
@@ -36,9 +40,29 @@ const delegateShape = {
   auto: z
     .boolean()
     .optional()
-    .describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
+    .describe(
+      `Auto-approve permissions for write mode. Default: ${config.auto}. When mode is omitted, false selects enforced read-only mode. Use mode: 'write', auto: false to retain normal OpenCode permissions without auto-approval.`,
+    ),
+  mode: z
+    .enum(["write", "read-only"])
+    .optional()
+    .describe(
+      "read-only permits only read/glob/grep via a restricted OpenCode agent. Write mode can edit and execute commands. Defaults from auto for backward compatibility.",
+    ),
+  worktree: z
+    .boolean()
+    .optional()
+    .describe(
+      "Create a retained isolated git worktree for a new write task. Source tree must be clean. Follow up with the returned cwd/session_id; no automatic merge or deletion.",
+    ),
   title: z.string().optional().describe("Session title shown in opencode."),
-  timeout_s: z.number().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config.timeoutSec}.`),
+  timeout_s: z
+    .number()
+    .int()
+    .positive()
+    .max(86400)
+    .optional()
+    .describe(`Total preparation/execution deadline in seconds (maximum 86400). Default: ${config.timeoutSec}.`),
 };
 
 server.registerTool(
@@ -49,12 +73,13 @@ server.registerTool(
     inputSchema: {
       filter: z.string().optional().describe("Case-insensitive substring filter, e.g. 'grok' or 'opencode-go/'."),
       refresh: z.boolean().optional().describe("Bypass the 5 minute cache."),
+      cwd: z.string().optional().describe("Project directory for project-specific providers/models."),
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ filter, refresh }) => {
+  async ({ filter, refresh, cwd }, extra) => {
     try {
-      let models = await listModels(refresh);
+      let models = await listModels(refresh, extra.signal, resolve(config.defaultCwd, cwd ?? "."));
       if (filter) models = models.filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
       return text(models.length ? models.join("\n") : "(no models match)");
     } catch (e) {
@@ -99,7 +124,7 @@ server.registerTool(
 
 function taskSummary(t: Task): string {
   const secs = (((t.finishedAt ?? Date.now()) - t.startedAt) / 1000).toFixed(0);
-  const model = t.outcome?.model ?? t.input.model ?? "(default)";
+  const model = t.outcome?.model ?? t.checkpoint?.model ?? t.input.model ?? "(default)";
   return `${t.id}  ${t.status.padEnd(9)} ${secs}s  ${model}  ${t.input.title ?? t.input.prompt.slice(0, 60).replace(/\s+/g, " ")}`;
 }
 
@@ -112,8 +137,12 @@ server.registerTool(
     inputSchema: delegateShape,
   },
   async (input) => {
-    const t = startTask(input);
-    return text(`started ${t.id}\nCall task_result with task_id="${t.id}" (optionally wait_s) to get the output.`);
+    try {
+      const t = startTask(input);
+      return text(`started ${t.id}\nCall task_result with task_id="${t.id}" (optionally wait_s) to get the output.`);
+    } catch (e) {
+      return text(e instanceof Error ? e.message : String(e), true);
+    }
   },
 );
 
@@ -124,7 +153,13 @@ server.registerTool(
     description: "Return the status/result of a delegate_async task, optionally waiting up to wait_s seconds for it to finish.",
     inputSchema: {
       task_id: z.string(),
-      wait_s: z.number().int().min(0).max(3600).optional().describe("Seconds to wait for completion before returning (default 0)."),
+      wait_s: z
+        .number()
+        .int()
+        .min(0)
+        .max(30)
+        .optional()
+        .describe("Seconds to wait for completion before returning (default 0, maximum 30)."),
     },
     annotations: { readOnlyHint: true },
   },
@@ -134,7 +169,8 @@ server.registerTool(
     await waitTask(t, wait_s ?? 0);
     if (t.status === "running") return text(`${taskSummary(t)}\nstill running — call again later or with a larger wait_s.`);
     if (t.outcome) return text(`task: ${t.id} (${t.status})\n${formatOutcome(t.outcome)}`, t.status !== "done");
-    return text(`task: ${t.id} (${t.status})\nerror: ${t.error}`, true);
+    const checkpoint = t.checkpoint ? `\ncwd: ${t.checkpoint.cwd}\nsession_id: ${t.checkpoint.sessionId ?? "(not recorded)"}` : "";
+    return text(`task: ${t.id} (${t.status})\nerror: ${t.error}${checkpoint}`, true);
   },
 );
 
@@ -180,12 +216,30 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ cwd, limit }) => {
+  async ({ cwd, limit }, extra) => {
     const dir = resolve(config.defaultCwd, cwd ?? ".");
-    const r = await execText(["session", "list", "-n", String(limit ?? 20)], dir);
-    if (r.code !== 0) return text(r.stderr.trim() || `exit ${r.code}`, true);
-    return text(r.stdout.trim() || "(no sessions)");
+    try {
+      const r = await execText(["session", "list", "--standalone", "--format", "json", "-n", String(limit ?? 20)], dir, extra.signal);
+      if (r.code !== 0) return text(r.stderr.trim() || `exit ${r.code}`, true);
+      return text(r.stdout.trim() || "(no sessions)");
+    } catch (e) {
+      return text(e instanceof Error ? e.message : String(e), true);
+    }
   },
 );
 
 await server.connect(new StdioServerTransport());
+
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopDelegates();
+  for (const task of listTasks()) if (task.status === "running") task.controller.abort(new Error("server shutting down"));
+  stopProcesses();
+  void server.close();
+  setTimeout(() => process.exit(0), config.killGraceMs + 1500).unref();
+}
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+process.stdin.once("end", shutdown);
