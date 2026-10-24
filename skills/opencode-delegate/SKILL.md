@@ -11,12 +11,12 @@ orchestrator**: you plan, write the brief, and review what comes back.
 
 ## Tools
 
-| Tool | Use |
-|---|---|
-| `list_models` (`filter?`) | Find the exact `provider/model` id. |
-| `delegate` | Run a task and wait for the result. |
+| Tool                                        | Use                                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------- |
+| `list_models` (`filter?`)                   | Find the exact `provider/model` id.                                         |
+| `delegate`                                  | Run a task and wait for the result.                                         |
 | `delegate_async` → `task_result` (`wait_s`) | Long tasks, or several models in parallel. Also `task_list`, `task_cancel`. |
-| `list_sessions` | Find a `session_id` to continue. |
+| `list_sessions`                             | Find a `session_id` to continue.                                            |
 
 In a plugin install the tools are named like `mcp__plugin_opencode-delegate_opencode__delegate`. With
 a manual install they are `mcp__opencode__delegate`.
@@ -25,15 +25,18 @@ a manual install they are `mcp__opencode__delegate`.
 
 - Pass what the user said: `model: "grok 4.7"`, `"kimi k3"`, `"xai grok 4.7"`. The server matches loose
   names. If a model is offered by several providers, the model maker's own provider wins over resellers
-  like `opencode-go`, so "grok 4.7" goes to `xai/grok-4.7`. A provider word in the name overrides this
+  like `opencode-go`, so "grok 4.7" goes to `xai/grok-4.7`. A provider word constrains the match
   ("opencode-go grok 4.7" → `opencode-go/…`). Include the provider word only when the user names one.
 - If you get an **ambiguous** error, the name matched several different models. Choose from the
   candidates it lists, and ask the user only if their intent is unclear.
 - For a reasoning variant, add `#variant`, e.g. `"xai/grok-4.7#high"`.
 - If the user names no model, omit `model`. Tasks that edit files get the default
-  (`opencode-go/muse-spark-1.3-contributor`). Read-only tasks with `auto: false` get the free
-  `opencode/muse-spark-1.3-contributor-free`. Use `auto: false` for reading or summarising files,
+  (`opencode-go/muse-spark-1.3-contributor`). Read-only tasks with `mode: "read-only"` get the free
+  `opencode/muse-spark-1.3-contributor-free`. Use `mode: "read-only"` for reading or summarising files,
   answering questions about code, and reviews.
+
+Exact provider/model IDs never fall back to another route. Prefer exact IDs or configured aliases
+when billing or provider selection matters. If the requested route is unavailable, report the error.
 
 ## Writing the brief (`prompt`)
 
@@ -50,10 +53,13 @@ Use `files` to attach key files. Keep `cwd` at the project root unless the task 
 ## Permissions
 
 `auto` defaults to true. The model can edit files and run commands without asking, but opencode rules
-set to "deny" are still enforced. Pass `auto: false` for read-only work, such as a review, a second
+set to "deny" are still enforced. Pass `mode: "read-only"` for read-only work, such as a review, a second
 opinion or a question.
 
 ## After it returns: review, don't trust blindly
+
+Read-only mode uses a dedicated agent with only read/glob/grep. Do not pass a custom agent.
+The legacy auto:false also selects this mode; mode:write, auto:false keeps normal permissions.
 
 The result reports status, `session_id`, token usage, the tools used, and **git changes**.
 
@@ -70,6 +76,21 @@ The result reports status, `session_id`, token usage, the tools used, and **git 
   non-overlapping files, because they share the directory.
 - **Compare**: give the same brief to 2–3 models in separate worktrees, then diff the results and pick
   or merge the best one.
-- **Second opinion**: `auto: false` with a prompt like "review this diff for bugs: …".
+- **Second opinion**: `mode: "read-only"` with a prompt like "review this diff for bugs: …".
 - **Subagents / workflows**: the `opencode-worker` agent wraps this loop. Spawn it with the model and task
   in its prompt, e.g. "Use opencode model kimi k3 to add tests for src/foo.ts".
+
+## Ownership and recovery
+
+Each task runs with a private OpenCode server. Prefer explicit session_id and returned cwd for
+follow-ups. Never use continue to guess which parallel session to resume. Same-worktree jobs are
+rejected; create separate worktrees before fan-out. worktree:true can create a retained isolated
+worktree for a new write job from a clean source tree; inspect that returned cwd before accepting.
+
+Git results include already-dirty files and HEAD movement. If change reporting is unavailable,
+inspect the complete repository yourself. Execution success does not mean task acceptance.
+Poll task_result with wait_s <= 30. After cancellation, inspect partial changes before retrying.
+If a journal restores a task as unknown/error, inspect its saved session instead of replaying it.
+
+Briefing, reviewing and any Claude worker subagent still consume Claude usage. Prefer direct
+delegation for simple tasks; request compact worker reports and measure retries.

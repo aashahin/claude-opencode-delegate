@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
 import { config } from "./config.ts";
+import { runProcess } from "./process.ts";
+import { REVIEW_AGENT, reviewEnvironment, type DelegateMode } from "./permissions.ts";
 
 export interface RunOptions {
   prompt: string;
@@ -14,6 +15,8 @@ export interface RunOptions {
   title?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  mode?: DelegateMode;
+  onSession?: (sessionId: string) => void;
 }
 
 export interface ToolCall {
@@ -21,6 +24,7 @@ export interface ToolCall {
   status: string;
   title?: string;
   input?: unknown;
+  error?: string;
 }
 
 export interface RunResult {
@@ -38,13 +42,14 @@ export interface RunResult {
 }
 
 export function buildArgs(o: RunOptions): string[] {
-  const args = ["run", "--format", "json"];
+  const args = ["run", "--standalone", "--format", "json"];
   if (o.model) args.push("--model", o.model);
-  if (o.agent) args.push("--agent", o.agent);
+  if (o.mode === "read-only") args.push("--agent", REVIEW_AGENT);
+  else if (o.agent) args.push("--agent", o.agent);
   if (o.sessionId) args.push("--session", o.sessionId);
   else if (o.continueLast) args.push("--continue");
   if (o.fork && (o.sessionId || o.continueLast)) args.push("--fork");
-  if (o.auto) args.push("--auto");
+  if (o.auto && o.mode !== "read-only") args.push("--auto");
   if (o.title) args.push("--title", o.title);
   for (const f of o.files ?? []) args.push("--file", f);
   // "--" so prompts starting with "-" are not parsed as flags
@@ -73,23 +78,34 @@ export class EventCollector {
       this.raw.push(trimmed);
       return;
     }
+    if (!e || typeof e !== "object" || Array.isArray(e)) throw new Error("invalid OpenCode event object");
+    if (e.sessionID !== undefined && typeof e.sessionID !== "string") throw new Error("invalid OpenCode session ID");
+    if (e.sessionID && this.sessionId && this.sessionId !== e.sessionID) throw new Error("mixed OpenCode session IDs");
     if (e.sessionID && !this.sessionId) this.sessionId = e.sessionID;
     const p = e.part ?? {};
     switch (e.type) {
       case "text":
-        if (typeof p.text === "string") this.texts.push(p.text);
+        if (typeof p.text !== "string") throw new Error("invalid OpenCode text event");
+        if (p.text.trim()) this.texts.push(p.text);
         break;
       case "tool_use":
+        if (typeof p.tool !== "string" || typeof p.state?.status !== "string") throw new Error("invalid OpenCode tool event");
         this.toolCalls.push({
           tool: p.tool,
           status: p.state?.status,
           title: p.state?.title,
           input: p.state?.input,
+          error: p.state?.error,
         });
         break;
       case "step_finish": {
         this.steps++;
         const t = p.tokens ?? {};
+        for (const value of [t.input, t.output, t.reasoning, t.cache?.read, t.cache?.write, p.cost]) {
+          if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+            throw new Error("invalid OpenCode usage event");
+          }
+        }
         this.tokens.input += t.input ?? 0;
         this.tokens.output += t.output ?? 0;
         this.tokens.reasoning += t.reasoning ?? 0;
@@ -116,83 +132,52 @@ function errorMessage(err: any): string {
   return typeof msg === "string" ? msg + ref : JSON.stringify(err);
 }
 
-export function runOpencode(o: RunOptions): Promise<RunResult> {
+export async function runOpencode(o: RunOptions): Promise<RunResult> {
   const started = Date.now();
   const collector = new EventCollector();
-  return new Promise((resolve) => {
-    const child = spawn(config.bin, buildArgs(o), {
-      cwd: o.cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let buf = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-
-    const kill = () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 3000).unref();
-      }
-    };
-    const timer = o.timeoutMs
-      ? setTimeout(() => {
-          timedOut = true;
-          kill();
-        }, o.timeoutMs)
-      : undefined;
-    o.signal?.addEventListener("abort", kill, { once: true });
-
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      buf += chunk;
-      let i: number;
-      while ((i = buf.indexOf("\n")) >= 0) {
-        collector.push(buf.slice(0, i));
-        buf = buf.slice(i + 1);
-      }
-    });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-      stderr = (stderr + chunk).slice(-8000);
-    });
-
-    const finish = (exitCode: number | null, spawnError?: string) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      collector.push(buf);
-      const errors = [...collector.errors];
-      if (spawnError) errors.push(spawnError);
-      if (timedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
-      else if (o.signal?.aborted) errors.push("cancelled");
-      if (exitCode && !errors.length) errors.push(stderr.trim().split("\n").slice(-5).join("\n") || `exit code ${exitCode}`);
-      resolve({
-        ok: exitCode === 0 && !errors.length,
-        sessionId: collector.sessionId,
-        text: collector.text,
-        toolCalls: collector.toolCalls,
-        tokens: collector.tokens,
-        cost: collector.cost,
-        steps: collector.steps,
-        error: errors.join("; ") || undefined,
-        exitCode,
-        timedOut,
-        durationMs: Date.now() - started,
-      });
-    };
-    child.on("error", (err) => finish(null, `failed to start '${config.bin}': ${err.message}`));
-    child.on("close", (code) => finish(code));
+  const r = await runProcess(config.bin, buildArgs(o), {
+    cwd: o.cwd,
+    env: o.mode === "read-only" ? reviewEnvironment() : undefined,
+    signal: o.signal,
+    timeoutMs: o.timeoutMs,
+    onLine: (line) => {
+      const previous = collector.sessionId;
+      collector.push(line);
+      if (collector.sessionId && !previous) o.onSession?.(collector.sessionId);
+    },
   });
+  const errors = [...collector.errors];
+  if (r.error) errors.push(r.error);
+  if (r.timedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
+  if (o.signal?.aborted && !r.error) errors.push("cancelled");
+  if (r.code !== 0 && !errors.length) errors.push(r.stderr.trim().split("\n").slice(-5).join("\n") || `exit code ${r.code}`);
+  if (
+    !errors.length &&
+    (!collector.sessionId || (!collector.texts.length && !collector.steps && !collector.toolCalls.length) || collector.raw.length)
+  ) {
+    errors.push("invalid OpenCode JSON output: no recognized session result or non-JSON stdout");
+  }
+  return {
+    ok: r.code === 0 && !errors.length,
+    sessionId: collector.sessionId,
+    text: collector.text,
+    toolCalls: collector.toolCalls,
+    tokens: collector.tokens,
+    cost: collector.cost,
+    steps: collector.steps,
+    error: errors.join("; ") || undefined,
+    exitCode: r.code,
+    timedOut: r.timedOut,
+    durationMs: Date.now() - started,
+  };
 }
 
-export function execText(args: string[], cwd?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(config.bin, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (c: string) => (stdout += c));
-    child.stderr.setEncoding("utf8").on("data", (c: string) => (stderr += c));
-    child.on("error", (err) => resolve({ code: null, stdout, stderr: err.message }));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
-  });
+export async function execText(
+  args: string[],
+  cwd?: string,
+  signal?: AbortSignal,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const r = await runProcess(config.bin, args, { cwd, signal });
+  if (r.error) throw new Error(r.error);
+  return { code: r.code, stdout: r.stdout, stderr: r.stderr };
 }

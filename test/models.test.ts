@@ -37,7 +37,7 @@ describe("resolveModel", () => {
     expect(pick("deepseek v4 flash")).toBe("opencode-go/deepseek-v4-flash");
     expect(pick("mimo v2.6 flash")).toBe("opencode-go/mimo-v2.6-flash");
   });
-  test("provider words and filler are soft", () => {
+  test("provider hints constrain routes while filler is ignored", () => {
     expect(pick("use grok 4.7 from xAI in opencode")).toBe("xai/grok-4.7");
     expect(pick("opencode-go grok 4.7")).toBe("opencode-go/grok-4.7");
     expect(pick("xai grok 4.20 reasoning")).toBe("xai/grok-4.20-0309-reasoning");
@@ -87,5 +87,26 @@ describe("same model from several providers", () => {
   });
   test("different models are never auto-picked by provider", () => {
     expect(pick("mimo")).toContain("ambiguous");
+  });
+});
+
+describe("routing constraints", () => {
+  test("an unavailable exact route never changes provider", () => {
+    expect(resolveModel("opencode-go/glm-5.3", ["zai/glm-5.3"]).ok).toBe(false);
+  });
+  test("version tokens have boundaries", () => {
+    expect(resolveModel("deepseek v4", ["other/deepseek-v4.1"]).ok).toBe(false);
+    expect(resolveModel("grok 4.7", ["xai/grok-4.70"]).ok).toBe(false);
+  });
+  test("the family must match even when another model has the requested number", () => {
+    expect(resolveModel("deepseek 5", ["zai/glm-5"]).ok).toBe(false);
+  });
+  test("an explicit loose provider cannot be silently substituted", () => {
+    expect(resolveModel("xai grok 4.7", ["xai/grok-4.6", "opencode-go/grok-4.7"]).ok).toBe(false);
+  });
+  test("opencode can name a provider as well as the host application", () => {
+    const r = resolveModel("opencode grok 4.7", ["opencode/grok-4.7", "xai/grok-4.7"]);
+    expect(r.ok && r.model).toBe("opencode/grok-4.7");
+    expect(resolveModel("xai opencode grok 4.7", ["opencode/grok-4.7", "xai/grok-4.7"]).ok).toBe(false);
   });
 });
