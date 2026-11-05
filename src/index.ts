@@ -37,7 +37,7 @@ const delegateShape = {
     .boolean()
     .optional()
     .describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
-  title: z.string().optional().describe("Session title shown in opencode."),
+  title: z.string().optional().describe("Session title shown in opencode. Default: \"delegate <8 hex chars>\". Always set, so opencode never makes a title-generation model call."),
   timeout_s: z.number().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config.timeoutSec}.`),
 };
 

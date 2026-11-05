@@ -45,7 +45,7 @@ export function buildArgs(o: RunOptions): string[] {
   else if (o.continueLast) args.push("--continue");
   if (o.fork && (o.sessionId || o.continueLast)) args.push("--fork");
   if (o.auto) args.push("--auto");
-  if (o.title) args.push("--title", o.title);
+  args.push("--title", o.title || `delegate ${crypto.randomUUID().slice(0, 8)}`);
   for (const f of o.files ?? []) args.push("--file", f);
   // "--" so prompts starting with "-" are not parsed as flags
   args.push("--", o.prompt);
