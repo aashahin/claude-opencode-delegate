@@ -13,6 +13,7 @@ export interface RunOptions {
   auto?: boolean;
   title?: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   signal?: AbortSignal;
 }
 
@@ -45,7 +46,7 @@ export function buildArgs(o: RunOptions): string[] {
   else if (o.continueLast) args.push("--continue");
   if (o.fork && (o.sessionId || o.continueLast)) args.push("--fork");
   if (o.auto) args.push("--auto");
-  if (o.title) args.push("--title", o.title);
+  args.push("--title", o.title || `delegate ${crypto.randomUUID().slice(0, 8)}`);
   for (const f of o.files ?? []) args.push("--file", f);
   // "--" so prompts starting with "-" are not parsed as flags
   args.push("--", o.prompt);
@@ -128,6 +129,7 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
     let buf = "";
     let stderr = "";
     let timedOut = false;
+    let idleKilled = false;
     let settled = false;
 
     const kill = () => {
@@ -142,6 +144,16 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
           kill();
         }, o.timeoutMs)
       : undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const armIdle = () => {
+      if (!o.idleTimeoutMs) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleKilled = true;
+        kill();
+      }, o.idleTimeoutMs);
+    };
+    armIdle();
     o.signal?.addEventListener("abort", kill, { once: true });
 
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
@@ -150,6 +162,7 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
       while ((i = buf.indexOf("\n")) >= 0) {
         collector.push(buf.slice(0, i));
         buf = buf.slice(i + 1);
+        armIdle();
       }
     });
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
@@ -160,10 +173,12 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       collector.push(buf);
       const errors = [...collector.errors];
       if (spawnError) errors.push(spawnError);
-      if (timedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
+      if (idleKilled) errors.push(`idle timeout: no activity for ${Math.round((o.idleTimeoutMs ?? 0) / 1000)}s`);
+      else if (timedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
       else if (o.signal?.aborted) errors.push("cancelled");
       if (exitCode && !errors.length) errors.push(stderr.trim().split("\n").slice(-5).join("\n") || `exit code ${exitCode}`);
       resolve({
@@ -176,7 +191,7 @@ export function runOpencode(o: RunOptions): Promise<RunResult> {
         steps: collector.steps,
         error: errors.join("; ") || undefined,
         exitCode,
-        timedOut,
+        timedOut: timedOut || idleKilled,
         durationMs: Date.now() - started,
       });
     };
