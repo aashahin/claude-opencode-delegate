@@ -38,7 +38,8 @@ const delegateShape = {
     .optional()
     .describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
   title: z.string().optional().describe("Session title shown in opencode. Default: \"delegate <8 hex chars>\". Always set, so opencode never makes a title-generation model call."),
-  timeout_s: z.number().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config.timeoutSec}.`),
+  idle_timeout_s: z.number().int().positive().optional().describe(`Kill the run if no output event arrives for this many seconds (resets on every event). Default: ${config.idleTimeoutSec}.`),
+  timeout_s: z.number().int().positive().optional().describe(`Optional absolute ceiling: kill the run after this many seconds of wall-clock time regardless of activity.${config.timeoutSec ? ` Default: ${config.timeoutSec}.` : " Default: none."}`),
 };
 
 server.registerTool(

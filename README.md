@@ -123,7 +123,7 @@ You can use exact ids (`opencode-go/grok-4.7`) or loose names (`grok 4.7`, `kimi
 - `cwd` and `agent` (for example `build`, `plan`, or your own agents)
 - `files` to attach
 - `session_id`, `continue`, or `fork` to follow up in an earlier session
-- `auto`, `title`, and `timeout_s`
+- `auto`, `title`, `idle_timeout_s`, and `timeout_s`
 
 ### Permissions
 
@@ -146,7 +146,8 @@ conflict.
 | `OPENCODE_DELEGATE_DEFAULT_MODEL` | `opencode-go/muse-spark-1.3-contributor` | Model used when `model` is omitted. Set it to `""` to use opencode's own default. |
 | `OPENCODE_DELEGATE_READ_MODEL` | `opencode/muse-spark-1.3-contributor-free` | Model used when `model` is omitted and `auto` is false (reading files, reviews, questions). Free by default. |
 | `OPENCODE_DELEGATE_AUTO` | `true` | Default for `auto`. |
-| `OPENCODE_DELEGATE_TIMEOUT` | `1800` | Seconds before a run is killed. |
+| `OPENCODE_DELEGATE_IDLE_TIMEOUT` | `90` | Seconds without a stdout event before a run is killed (resets on each event). |
+| `OPENCODE_DELEGATE_TIMEOUT` | unset | Optional absolute ceiling in seconds; unset means none. |
 | `OPENCODE_DELEGATE_MAX_OUTPUT` | `40000` | Maximum number of response characters returned to Claude. |
 | `OPENCODE_DELEGATE_CWD` | the server's cwd | Base directory for `cwd`. |
 | `OPENCODE_DELEGATE_PREFERRED_PROVIDERS` | *(none)* | Comma-separated provider order used when a model is offered by several providers, e.g. `xai,opencode-go`. Without it, the model maker's own provider beats resellers. |

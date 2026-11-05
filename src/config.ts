@@ -45,7 +45,10 @@ export const config = {
   // Used when no model is given and the run is read-only (auto: false): reading, reviews, questions.
   readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
-  timeoutSec: int(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
+  // Absolute ceiling in seconds; undefined (env unset) means no ceiling.
+  timeoutSec: process.env.OPENCODE_DELEGATE_TIMEOUT ? int(process.env.OPENCODE_DELEGATE_TIMEOUT, 0) || undefined : undefined,
+  // Kill a run when no JSON event line arrives on stdout for this many seconds.
+  idleTimeoutSec: int(process.env.OPENCODE_DELEGATE_IDLE_TIMEOUT, 90),
   maxOutputChars: int(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
   defaultCwd: process.env.OPENCODE_DELEGATE_CWD || process.cwd(),
   // Providers to prefer when the same model is offered by several, highest priority first.

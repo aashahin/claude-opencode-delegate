@@ -21529,7 +21529,8 @@ var config2 = {
   defaultModel: model(process.env.OPENCODE_DELEGATE_DEFAULT_MODEL, "opencode-go/muse-spark-1.3-contributor"),
   readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
-  timeoutSec: int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800),
+  timeoutSec: process.env.OPENCODE_DELEGATE_TIMEOUT ? int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 0) || undefined : undefined,
+  idleTimeoutSec: int2(process.env.OPENCODE_DELEGATE_IDLE_TIMEOUT, 90),
   maxOutputChars: int2(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
   defaultCwd: process.env.OPENCODE_DELEGATE_CWD || process.cwd(),
   preferredProviders: (process.env.OPENCODE_DELEGATE_PREFERRED_PROVIDERS ?? "").split(",").map((p) => p.trim().toLowerCase()).filter(Boolean)
@@ -21556,8 +21557,7 @@ function buildArgs(o) {
     args.push("--fork");
   if (o.auto)
     args.push("--auto");
-  if (o.title)
-    args.push("--title", o.title);
+  args.push("--title", o.title || `delegate ${crypto.randomUUID().slice(0, 8)}`);
   for (const f of o.files ?? [])
     args.push("--file", f);
   args.push("--", o.prompt);
@@ -21640,6 +21640,7 @@ function runOpencode(o) {
     let buf = "";
     let stderr = "";
     let timedOut = false;
+    let idleKilled = false;
     let settled = false;
     const kill = () => {
       if (child.exitCode === null) {
@@ -21651,6 +21652,18 @@ function runOpencode(o) {
       timedOut = true;
       kill();
     }, o.timeoutMs) : undefined;
+    let idleTimer;
+    const armIdle = () => {
+      if (!o.idleTimeoutMs)
+        return;
+      if (idleTimer)
+        clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleKilled = true;
+        kill();
+      }, o.idleTimeoutMs);
+    };
+    armIdle();
     o.signal?.addEventListener("abort", kill, { once: true });
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
       buf += chunk;
@@ -21659,6 +21672,7 @@ function runOpencode(o) {
 `)) >= 0) {
         collector.push(buf.slice(0, i));
         buf = buf.slice(i + 1);
+        armIdle();
       }
     });
     child.stderr.setEncoding("utf8").on("data", (chunk) => {
@@ -21670,11 +21684,15 @@ function runOpencode(o) {
       settled = true;
       if (timer)
         clearTimeout(timer);
+      if (idleTimer)
+        clearTimeout(idleTimer);
       collector.push(buf);
       const errors = [...collector.errors];
       if (spawnError)
         errors.push(spawnError);
-      if (timedOut)
+      if (idleKilled)
+        errors.push(`idle timeout: no activity for ${Math.round((o.idleTimeoutMs ?? 0) / 1000)}s`);
+      else if (timedOut)
         errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
       else if (o.signal?.aborted)
         errors.push("cancelled");
@@ -21692,7 +21710,7 @@ function runOpencode(o) {
         steps: collector.steps,
         error: errors.join("; ") || undefined,
         exitCode,
-        timedOut,
+        timedOut: timedOut || idleKilled,
         durationMs: Date.now() - started
       });
     };
@@ -21851,7 +21869,8 @@ async function delegate(input, signal) {
     fork: input.fork,
     auto,
     title: input.title,
-    timeoutMs: (input.timeout_s ?? config2.timeoutSec) * 1000,
+    timeoutMs: input.timeout_s ?? config2.timeoutSec ? (input.timeout_s ?? config2.timeoutSec) * 1000 : undefined,
+    idleTimeoutMs: (input.idle_timeout_s ?? config2.idleTimeoutSec) * 1000,
     signal
   });
   const after = before && gitStatus(cwd);
@@ -21973,8 +21992,9 @@ var delegateShape = {
   continue: boolean2().optional().describe("Continue the most recent opencode session in cwd."),
   fork: boolean2().optional().describe("Fork the session given by session_id/continue instead of appending to it."),
   auto: boolean2().optional().describe(`Auto-approve tool permissions (edits, shell) that are not explicitly denied. Default: ${config2.auto}. Set false for read-only work (reading files, reviews, questions); without a model that also selects the free read model.`),
-  title: string2().optional().describe("Session title shown in opencode."),
-  timeout_s: number2().int().positive().optional().describe(`Kill the run after this many seconds. Default: ${config2.timeoutSec}.`)
+  title: string2().optional().describe('Session title shown in opencode. Default: "delegate <8 hex chars>". Always set, so opencode never makes a title-generation model call.'),
+  idle_timeout_s: number2().int().positive().optional().describe(`Kill the run if no output event arrives for this many seconds (resets on every event). Default: ${config2.idleTimeoutSec}.`),
+  timeout_s: number2().int().positive().optional().describe(`Optional absolute ceiling: kill the run after this many seconds of wall-clock time regardless of activity.${config2.timeoutSec ? ` Default: ${config2.timeoutSec}.` : " Default: none."}`)
 };
 server.registerTool("list_models", {
   title: "List opencode models",
