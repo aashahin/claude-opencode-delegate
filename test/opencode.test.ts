@@ -33,19 +33,48 @@ describe("EventCollector", () => {
     c.push("plain output");
     expect(c.text).toBe("plain output");
   });
+  test("rejects malformed event shapes and mixed sessions", () => {
+    expect(() => new EventCollector().push("null")).toThrow("event object");
+    expect(() => new EventCollector().push('{"type":"tool_use","sessionID":"s","part":{}}')).toThrow("tool event");
+    const c = new EventCollector();
+    c.push('{"type":"text","sessionID":"one","part":{"text":"hello"}}');
+    expect(() => c.push('{"type":"text","sessionID":"two","part":{"text":"other"}}')).toThrow("mixed");
+  });
+  test("rejects invalid usage counters", () => {
+    expect(() => new EventCollector().push('{"type":"step_finish","part":{"tokens":{"input":"bad"}}}')).toThrow("usage");
+  });
 });
 
 describe("buildArgs", () => {
   test("full options", () => {
     expect(
       buildArgs({ prompt: "-do it", model: "a/b", agent: "build", sessionId: "ses_1", fork: true, auto: true, title: "t", files: ["/x"] }),
-    ).toEqual(["run", "--format", "json", "--model", "a/b", "--agent", "build", "--session", "ses_1", "--fork", "--auto", "--title", "t", "--file", "/x", "--", "-do it"]);
+    ).toEqual([
+      "run",
+      "--standalone",
+      "--format",
+      "json",
+      "--model",
+      "a/b",
+      "--agent",
+      "build",
+      "--session",
+      "ses_1",
+      "--fork",
+      "--auto",
+      "--title",
+      "t",
+      "--file",
+      "/x",
+      "--",
+      "-do it",
+    ]);
   });
   test("minimal", () => {
     const a = buildArgs({ prompt: "hi" });
-    expect(a.slice(0, 4)).toEqual(["run", "--format", "json", "--title"]);
-    expect(a[4]).toMatch(/^delegate [0-9a-f]{8}$/);
-    expect(a.slice(5)).toEqual(["--", "hi"]);
+    expect(a.slice(0, 5)).toEqual(["run", "--standalone", "--format", "json", "--title"]);
+    expect(a[5]).toMatch(/^delegate [0-9a-f]{8}$/);
+    expect(a.slice(6)).toEqual(["--", "hi"]);
   });
   test("fork without a session is dropped", () => {
     expect(buildArgs({ prompt: "hi", fork: true })).not.toContain("--fork");

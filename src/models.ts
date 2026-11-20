@@ -1,25 +1,31 @@
 import { config } from "./config.ts";
 import { execText } from "./opencode.ts";
+import { checkAbort } from "./process.ts";
+import { resolve } from "node:path";
 
 const CACHE_MS = 5 * 60 * 1000;
-let cache: { at: number; models: string[] } | undefined;
+let cache: { at: number; key: string; models: string[] } | undefined;
 
-export async function listModels(refresh = false): Promise<string[]> {
-  if (!refresh && cache && Date.now() - cache.at < CACHE_MS) return cache.models;
+export async function listModels(refresh = false, signal?: AbortSignal, cwd = config.defaultCwd): Promise<string[]> {
+  checkAbort(signal);
+  cwd = resolve(cwd);
+  const key = JSON.stringify([config.bin, cwd, process.env.OPENCODE_CONFIG_CONTENT]);
+  if (!refresh && cache?.key === key && Date.now() - cache.at < CACHE_MS) return cache.models;
   // `opencode models` can print a truncated/empty list while its background service is cold-starting,
   // so repeat until two consecutive runs agree (max 4) and keep the longest list.
   let best: string[] = [];
   let prev: string[] | undefined;
   for (let i = 0; i < 4; i++) {
-    const { code, stdout, stderr } = await execText(["models"]);
+    const { code, stdout, stderr } = await execText(["models", "--standalone"], cwd, signal);
+    checkAbort(signal);
     if (code !== 0) throw new Error(`'opencode models' failed: ${stderr.trim() || `exit ${code}`}`);
     const models = parseModels(stdout);
     if (models.length > best.length) best = models;
-    if (prev && models.length > 0 && models.length === prev.length) break;
+    if (prev && models.length > 0 && models.length === prev.length && models.every((m, i) => m === prev![i])) break;
     prev = models;
   }
   if (!best.length) throw new Error("'opencode models' returned no models — is a provider configured? Try `opencode auth`.");
-  cache = { at: Date.now(), models: best };
+  cache = { at: Date.now(), key, models: best };
   return best;
 }
 
@@ -74,9 +80,7 @@ const splitId = (id: string) => {
   return { provider: id.slice(0, i), name: id.slice(i + 1).toLowerCase() };
 };
 
-export type Resolution =
-  | { ok: true; model: string; exact: boolean }
-  | { ok: false; reason: string; candidates: string[] };
+export type Resolution = { ok: true; model: string; exact: boolean } | { ok: false; reason: string; candidates: string[] };
 
 /**
  * Resolves a loose model name ("grok 4.7", "xAI grok-4.7", "kimi k3") to an opencode `provider/model` id.
@@ -93,10 +97,22 @@ export function resolveModel(query: string, models: string[], preferred: string[
 
   const exact = models.find((m) => m.toLowerCase() === base.toLowerCase());
   if (exact) return { ok: true, model: withVariant(exact), exact: true };
+  // An explicit execution route must never fall back to another provider/model.
+  if (base.includes("/")) return { ok: false, reason: `unknown exact model id '${base}'`, candidates: [] };
 
   const tokens = tokenize(base);
   if (!tokens.length) return { ok: false, reason: `empty model name '${query}'`, candidates: [] };
   const isVersion = (t: string) => /\d/.test(t);
+  const providers = [...new Set(models.map((id) => splitId(id).provider.toLowerCase()))];
+  const words = base.toLowerCase().split(/\s+/);
+  const providerHints = providers.filter((p) => {
+    const i = words.indexOf(p);
+    return i >= 0 && !(p === "opencode" && i > 0 && ["in", "via", "using", "with"].includes(words[i - 1]!));
+  });
+  if (providerHints.length > 1) return { ok: false, reason: "conflicting provider hints", candidates: [] };
+  const explicitProvider = providerHints[0];
+  const providerTokens = new Set(explicitProvider ? tokenize(explicitProvider) : []);
+  const nameQuery = tokens.filter((t) => !providerTokens.has(t));
 
   type Scored = { id: string; score: number; extras: number };
   const scored = models
@@ -105,8 +121,9 @@ export function resolveModel(query: string, models: string[], preferred: string[
       const name = lower.slice(lower.indexOf("/") + 1);
       const idTokens = new Set(tokenize(lower));
       const nameTokens = tokenize(name);
-      if (!tokens.filter(isVersion).every((t) => name.includes(t))) return undefined;
-      if (!tokens.some((t) => name.includes(t))) return undefined;
+      if (explicitProvider && splitId(id).provider.toLowerCase() !== explicitProvider) return undefined;
+      // Match complete version/name tokens: v4 must not become v4.1, nor a family disappear.
+      if (!nameQuery.length || !nameQuery.every((t) => nameTokens.includes(t))) return undefined;
       let score = 0;
       for (const t of tokens) {
         const hit = idTokens.has(t) ? 3 : lower.includes(t) ? 1 : 0;
@@ -127,9 +144,7 @@ export function resolveModel(query: string, models: string[], preferred: string[
     // Same model from several providers → take the best-ranked provider if it is unique.
     const names = new Set(tied.map((t) => splitId(t.id).name));
     if (names.size === 1) {
-      const ranked = tied
-        .map((t) => ({ id: t.id, rank: providerRank(splitId(t.id).provider, preferred) }))
-        .sort((a, b) => a.rank - b.rank);
+      const ranked = tied.map((t) => ({ id: t.id, rank: providerRank(splitId(t.id).provider, preferred) })).sort((a, b) => a.rank - b.rank);
       if (ranked[0]!.rank < ranked[1]!.rank) return { ok: true, model: withVariant(ranked[0]!.id), exact: false };
     }
     return { ok: false, reason: `'${query}' is ambiguous`, candidates: tied.map((t) => t.id) };
@@ -137,13 +152,13 @@ export function resolveModel(query: string, models: string[], preferred: string[
   return { ok: true, model: withVariant(best.id), exact: false };
 }
 
-export async function resolveModelOrThrow(query: string): Promise<string> {
-  const models = await listModels();
+export async function resolveModelOrThrow(query: string, signal?: AbortSignal, cwd?: string): Promise<string> {
+  query = Object.hasOwn(config.modelAliases, query) ? config.modelAliases[query]! : query;
+  const models = await listModels(false, signal, cwd);
+  checkAbort(signal);
   const r = resolveModel(query, models);
   if (r.ok) return r.model;
-  const alts = r.candidates.length
-    ? r.candidates
-    : models.filter((m) => tokenize(query).some((t) => m.toLowerCase().includes(t)));
+  const alts = r.candidates.length ? r.candidates : models.filter((m) => tokenize(query).some((t) => m.toLowerCase().includes(t)));
   throw new Error(
     `${r.reason}.${alts.length ? ` Did you mean one of: ${alts.slice(0, 20).join(", ")}?` : ""} Use list_models to see all models.`,
   );

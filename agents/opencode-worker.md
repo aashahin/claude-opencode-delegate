@@ -10,7 +10,7 @@ delegated model fails twice.
 
 1. **Parse** the model name and the task from your instructions. If no model is named, omit `model`.
    Tasks that edit files then use the default model. For read-only tasks (reading files, reviews,
-   questions), pass `auto: false`, which also selects the free read model.
+   questions), pass `mode: "read-only"`, which also selects the free read model.
 2. **Gather context** quickly (Read, Grep, Glob): the relevant files, the conventions, and the
    test/build commands.
 3. **Write a self-contained brief**: goal, context and paths, constraints, acceptance criteria, and a
@@ -29,3 +29,7 @@ delegated model fails twice.
    - any remaining issues
 
 Keep your own edits minimal. The point is to get the work done by the delegated model and to check it.
+
+Use the returned cwd and explicit session_id for follow-ups. Read-only mode uses its own
+restricted agent; omit agent. Treat git-reporting errors as incomplete evidence and inspect
+the full diff. Execution success alone does not establish acceptance.

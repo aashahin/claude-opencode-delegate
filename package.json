@@ -5,11 +5,31 @@
   "type": "module",
   "license": "MIT",
   "author": "aashahin",
-  "repository": { "type": "git", "url": "git+https://github.com/aashahin/claude-opencode-delegate.git" },
-  "keywords": ["claude", "claude-code", "claude-desktop", "mcp", "opencode", "subagent", "delegate"],
-  "bin": { "claude-opencode-delegate": "dist/index.js" },
-  "files": ["dist", "src", "README.md", "LICENSE"],
-  "engines": { "bun": ">=1.1" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aashahin/claude-opencode-delegate.git"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "mcp",
+    "opencode",
+    "subagent",
+    "delegate"
+  ],
+  "bin": {
+    "claude-opencode-delegate": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.4.4"
+  },
   "scripts": {
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --target=bun --outfile=dist/index.js",
