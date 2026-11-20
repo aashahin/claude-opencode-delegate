@@ -17,6 +17,7 @@ export interface DelegateInput {
   auto?: boolean;
   title?: string;
   timeout_s?: number;
+  idle_timeout_s?: number;
 }
 
 export interface DelegateOutcome {
@@ -52,7 +53,8 @@ export async function delegate(input: DelegateInput, signal?: AbortSignal): Prom
     fork: input.fork,
     auto,
     title: input.title,
-    timeoutMs: (input.timeout_s ?? config.timeoutSec) * 1000,
+    timeoutMs: (input.timeout_s ?? config.timeoutSec) ? (input.timeout_s ?? config.timeoutSec!) * 1000 : undefined,
+    idleTimeoutMs: (input.idle_timeout_s ?? config.idleTimeoutSec) * 1000,
     signal,
   });
   const after = before && gitStatus(cwd);

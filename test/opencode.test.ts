@@ -42,7 +42,10 @@ describe("buildArgs", () => {
     ).toEqual(["run", "--format", "json", "--model", "a/b", "--agent", "build", "--session", "ses_1", "--fork", "--auto", "--title", "t", "--file", "/x", "--", "-do it"]);
   });
   test("minimal", () => {
-    expect(buildArgs({ prompt: "hi" })).toEqual(["run", "--format", "json", "--", "hi"]);
+    const a = buildArgs({ prompt: "hi" });
+    expect(a.slice(0, 4)).toEqual(["run", "--format", "json", "--title"]);
+    expect(a[4]).toMatch(/^delegate [0-9a-f]{8}$/);
+    expect(a.slice(5)).toEqual(["--", "hi"]);
   });
   test("fork without a session is dropped", () => {
     expect(buildArgs({ prompt: "hi", fork: true })).not.toContain("--fork");
