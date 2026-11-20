@@ -119,6 +119,18 @@ describe("delegation process boundaries", () => {
     expect(Date.now() - started).toBeLessThan(1000);
     expect(existsSync(join(cwd, "marker"))).toBe(false);
   });
+  test("idle timeout stops a run that goes silent", async () => {
+    const result = await runOpencode({ prompt: "hang", cwd, idleTimeoutMs: 200 });
+    expect(result.ok).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.error).toContain("idle timeout");
+  });
+  test("an active run without a ceiling outlives the helper deadline", async () => {
+    config.helperTimeoutSec = 0.1;
+    const result = await runOpencode({ prompt: "slow", cwd, idleTimeoutMs: 300 });
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("tick 5");
+  });
   test("directory locks reject conflicting tasks without releasing another owner's lock", async () => {
     const controller = new AbortController();
     let ready!: () => void;

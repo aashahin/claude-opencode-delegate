@@ -71,7 +71,10 @@ describe("buildArgs", () => {
     ]);
   });
   test("minimal", () => {
-    expect(buildArgs({ prompt: "hi" })).toEqual(["run", "--standalone", "--format", "json", "--", "hi"]);
+    const a = buildArgs({ prompt: "hi" });
+    expect(a.slice(0, 5)).toEqual(["run", "--standalone", "--format", "json", "--title"]);
+    expect(a[5]).toMatch(/^delegate [0-9a-f]{8}$/);
+    expect(a.slice(6)).toEqual(["--", "hi"]);
   });
   test("fork without a session is dropped", () => {
     expect(buildArgs({ prompt: "hi", fork: true })).not.toContain("--fork");

@@ -127,7 +127,7 @@ You can use exact ids (`opencode-go/grok-4.7`) or loose names (`grok 4.7`, `kimi
 - `cwd` and `agent` (for example `build`, `plan`, or your own agents)
 - `files` to attach
 - `session_id`, `continue`, or `fork` to follow up in an earlier session
-- `mode` (`write` or `read-only`), `auto`, `title`, and `timeout_s`
+- `mode` (`write` or `read-only`), `auto`, `title`, `idle_timeout_s`, and `timeout_s`
 - `worktree: true` for a new isolated write task from a clean Git repository
 
 ### Permissions and execution modes
@@ -194,7 +194,8 @@ conflict.
 | `OPENCODE_DELEGATE_DEFAULT_MODEL`       | `opencode-go/muse-spark-1.3-contributor`   | Model used when `model` is omitted. Set it to `""` to use opencode's own default.                                                                                     |
 | `OPENCODE_DELEGATE_READ_MODEL`          | `opencode/muse-spark-1.3-contributor-free` | Model used when `model` is omitted in read-only mode, including legacy `auto: false`.                                                                                 |
 | `OPENCODE_DELEGATE_AUTO`                | `true`                                     | Default for `auto`.                                                                                                                                                   |
-| `OPENCODE_DELEGATE_TIMEOUT`             | `1800`                                     | Total preparation/execution deadline in seconds, capped at 86400.                                                                                                     |
+| `OPENCODE_DELEGATE_IDLE_TIMEOUT`        | `90`                                       | Seconds without a stdout event before a run is killed (resets on each event).                                                                                         |
+| `OPENCODE_DELEGATE_TIMEOUT`             | _(unset)_                                  | Optional absolute preparation/execution ceiling in seconds, capped at 86400. Unset means none.                                                                        |
 | `OPENCODE_DELEGATE_MAX_OUTPUT`          | `40000`                                    | Maximum number of response characters returned to Claude.                                                                                                             |
 | `OPENCODE_DELEGATE_MAX_CAPTURE`         | `1048576`                                  | Maximum stdout bytes collected per subprocess, including streamed JSON.                                                                                               |
 | `OPENCODE_DELEGATE_HELPER_TIMEOUT`      | `30`                                       | Deadline in seconds for discovery, session listing and Git helpers.                                                                                                   |

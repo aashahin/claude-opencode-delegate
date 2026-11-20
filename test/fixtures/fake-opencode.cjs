@@ -32,6 +32,12 @@ else if (prompt === "modify-existing") {
 } else if (prompt === "hang") {
   emit("running");
   setInterval(() => {}, 1000);
+} else if (prompt === "slow") {
+  let n = 0;
+  const t = setInterval(() => {
+    emit(`tick ${++n}`);
+    if (n === 5) clearInterval(t);
+  }, 100);
 } else if (prompt === "tree") {
   process.on("SIGINT", () => {});
   const child = spawn(

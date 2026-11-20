@@ -22,6 +22,7 @@ export interface DelegateInput {
   worktree?: boolean;
   title?: string;
   timeout_s?: number;
+  idle_timeout_s?: number;
 }
 export interface DelegateOutcome {
   model?: string;
@@ -56,8 +57,11 @@ export async function delegate(
   if (controllers.size >= config.maxTasks) throw new Error(`maximum of ${config.maxTasks} active delegations reached`);
   const controller = new AbortController();
   controllers.add(controller);
-  const duration = (input.timeout_s ?? config.timeoutSec) * 1000;
-  const deadline = setTimeout(() => controller.abort(new Error("delegation deadline exceeded")), duration);
+  const ceilingSec = input.timeout_s ?? config.timeoutSec;
+  const duration = ceilingSec ? ceilingSec * 1000 : undefined;
+  const deadline = duration
+    ? setTimeout(() => controller.abort(new Error("delegation deadline exceeded")), duration)
+    : undefined;
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const owned = new Set<string>();
   try {
@@ -119,6 +123,7 @@ export async function delegate(
       mode,
       title: input.title,
       timeoutMs: duration,
+      idleTimeoutMs: (input.idle_timeout_s ?? config.idleTimeoutSec) * 1000,
       signal: combined,
       onSession: (sessionId) => checkpoint?.({ cwd, model, sessionId }),
     });
@@ -136,7 +141,7 @@ export async function delegate(
     return outcome;
   } finally {
     for (const key of owned) locks.delete(key);
-    clearTimeout(deadline);
+    if (deadline) clearTimeout(deadline);
     controllers.delete(controller);
   }
 }

@@ -14,6 +14,7 @@ export interface RunOptions {
   auto?: boolean;
   title?: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   signal?: AbortSignal;
   mode?: DelegateMode;
   onSession?: (sessionId: string) => void;
@@ -50,7 +51,7 @@ export function buildArgs(o: RunOptions): string[] {
   else if (o.continueLast) args.push("--continue");
   if (o.fork && (o.sessionId || o.continueLast)) args.push("--fork");
   if (o.auto && o.mode !== "read-only") args.push("--auto");
-  if (o.title) args.push("--title", o.title);
+  args.push("--title", o.title || `delegate ${crypto.randomUUID().slice(0, 8)}`);
   for (const f of o.files ?? []) args.push("--file", f);
   // "--" so prompts starting with "-" are not parsed as flags
   args.push("--", o.prompt);
@@ -139,7 +140,9 @@ export async function runOpencode(o: RunOptions): Promise<RunResult> {
     cwd: o.cwd,
     env: o.mode === "read-only" ? reviewEnvironment() : undefined,
     signal: o.signal,
-    timeoutMs: o.timeoutMs,
+    // 0 disables the wall-clock ceiling; runProcess otherwise defaults to the helper deadline.
+    timeoutMs: o.timeoutMs ?? 0,
+    idleTimeoutMs: o.idleTimeoutMs,
     onLine: (line) => {
       const previous = collector.sessionId;
       collector.push(line);
@@ -148,7 +151,7 @@ export async function runOpencode(o: RunOptions): Promise<RunResult> {
   });
   const errors = [...collector.errors];
   if (r.error) errors.push(r.error);
-  if (r.timedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
+  if (r.timedOut && !r.idleTimedOut) errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
   if (o.signal?.aborted && !r.error) errors.push("cancelled");
   if (r.code !== 0 && !errors.length) errors.push(r.stderr.trim().split("\n").slice(-5).join("\n") || `exit code ${r.code}`);
   if (

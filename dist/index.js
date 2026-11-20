@@ -21536,7 +21536,8 @@ var config2 = {
   defaultModel: model(process.env.OPENCODE_DELEGATE_DEFAULT_MODEL, "opencode-go/muse-spark-1.3-contributor"),
   readModel: model(process.env.OPENCODE_DELEGATE_READ_MODEL, "opencode/muse-spark-1.3-contributor-free"),
   auto: bool(process.env.OPENCODE_DELEGATE_AUTO, true),
-  timeoutSec: Math.min(int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 1800), 86400),
+  timeoutSec: process.env.OPENCODE_DELEGATE_TIMEOUT ? Math.min(int2(process.env.OPENCODE_DELEGATE_TIMEOUT, 0), 86400) || undefined : undefined,
+  idleTimeoutSec: int2(process.env.OPENCODE_DELEGATE_IDLE_TIMEOUT, 90),
   maxOutputChars: int2(process.env.OPENCODE_DELEGATE_MAX_OUTPUT, 40000),
   maxCaptureBytes: int2(process.env.OPENCODE_DELEGATE_MAX_CAPTURE, 1024 * 1024),
   helperTimeoutSec: Math.min(int2(process.env.OPENCODE_DELEGATE_HELPER_TIMEOUT, 30), 86400),
@@ -21589,24 +21590,27 @@ function runProcess(bin, args, o = {}) {
     });
     const maxBytes = o.maxBytes ?? config2.maxCaptureBytes;
     let stdout = "", stderr = "", buffer = "";
-    let bytes = 0, timedOut = false, error;
+    let bytes = 0, timedOut = false, idleTimedOut = false, error;
     let stopped = false, closed = false, reaped = false;
     let code = null;
     let forceTimer;
     let closeTimer;
     let timer;
+    let idleTimer;
     const finish = () => {
       if (!closed || !reaped)
         return;
       if (timer)
         clearTimeout(timer);
+      if (idleTimer)
+        clearTimeout(idleTimer);
       if (forceTimer)
         clearTimeout(forceTimer);
       if (closeTimer)
         clearTimeout(closeTimer);
       o.signal?.removeEventListener("abort", cancel);
       active.delete(stop);
-      resolve({ code, stdout, stderr, error, timedOut });
+      resolve({ code, stdout, stderr, error, timedOut, idleTimedOut });
     };
     const force = () => {
       try {
@@ -21642,11 +21646,26 @@ function runProcess(bin, args, o = {}) {
     o.signal?.addEventListener("abort", cancel, { once: true });
     if (o.signal?.aborted)
       cancel();
-    timer = setTimeout(() => {
-      timedOut = true;
-      error ??= "process timed out";
-      stop();
-    }, o.timeoutMs ?? config2.helperTimeoutSec * 1000);
+    const wallMs = o.timeoutMs ?? config2.helperTimeoutSec * 1000;
+    if (wallMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        error ??= "process timed out";
+        stop();
+      }, wallMs);
+    }
+    const armIdle = () => {
+      if (!o.idleTimeoutMs || stopped)
+        return;
+      if (idleTimer)
+        clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        timedOut = idleTimedOut = true;
+        error ??= `idle timeout: no activity for ${Math.round(o.idleTimeoutMs / 1000)}s`;
+        stop();
+      }, o.idleTimeoutMs);
+    };
+    armIdle();
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
       if (stopped)
         return;
@@ -21666,6 +21685,7 @@ function runProcess(bin, args, o = {}) {
 `)) >= 0) {
         const line = buffer.slice(0, i);
         buffer = buffer.slice(i + 1);
+        armIdle();
         try {
           o.onLine(line);
         } catch (e) {
@@ -21751,8 +21771,7 @@ function buildArgs(o) {
     args.push("--fork");
   if (o.auto && o.mode !== "read-only")
     args.push("--auto");
-  if (o.title)
-    args.push("--title", o.title);
+  args.push("--title", o.title || `delegate ${crypto.randomUUID().slice(0, 8)}`);
   for (const f of o.files ?? [])
     args.push("--file", f);
   args.push("--", o.prompt);
@@ -21846,7 +21865,8 @@ async function runOpencode(o) {
     cwd: o.cwd,
     env: o.mode === "read-only" ? reviewEnvironment() : undefined,
     signal: o.signal,
-    timeoutMs: o.timeoutMs,
+    timeoutMs: o.timeoutMs ?? 0,
+    idleTimeoutMs: o.idleTimeoutMs,
     onLine: (line) => {
       const previous = collector.sessionId;
       collector.push(line);
@@ -21857,7 +21877,7 @@ async function runOpencode(o) {
   const errors = [...collector.errors];
   if (r.error)
     errors.push(r.error);
-  if (r.timedOut)
+  if (r.timedOut && !r.idleTimedOut)
     errors.push(`timed out after ${Math.round((o.timeoutMs ?? 0) / 1000)}s`);
   if (o.signal?.aborted && !r.error)
     errors.push("cancelled");
@@ -22161,8 +22181,9 @@ async function delegate(input, signal, checkpoint) {
     throw new Error(`maximum of ${config2.maxTasks} active delegations reached`);
   const controller = new AbortController;
   controllers.add(controller);
-  const duration = (input.timeout_s ?? config2.timeoutSec) * 1000;
-  const deadline = setTimeout(() => controller.abort(new Error("delegation deadline exceeded")), duration);
+  const ceilingSec = input.timeout_s ?? config2.timeoutSec;
+  const duration = ceilingSec ? ceilingSec * 1000 : undefined;
+  const deadline = duration ? setTimeout(() => controller.abort(new Error("delegation deadline exceeded")), duration) : undefined;
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const owned = new Set;
   try {
@@ -22224,6 +22245,7 @@ async function delegate(input, signal, checkpoint) {
       mode,
       title: input.title,
       timeoutMs: duration,
+      idleTimeoutMs: (input.idle_timeout_s ?? config2.idleTimeoutSec) * 1000,
       signal: combined,
       onSession: (sessionId) => checkpoint?.({ cwd, model, sessionId })
     });
@@ -22241,7 +22263,8 @@ async function delegate(input, signal, checkpoint) {
   } finally {
     for (const key of owned)
       locks.delete(key);
-    clearTimeout(deadline);
+    if (deadline)
+      clearTimeout(deadline);
     controllers.delete(controller);
   }
 }
@@ -22478,8 +22501,9 @@ var delegateShape = {
   auto: boolean2().optional().describe(`Auto-approve permissions for write mode. Default: ${config2.auto}. When mode is omitted, false selects enforced read-only mode. Use mode: 'write', auto: false to retain normal OpenCode permissions without auto-approval.`),
   mode: _enum(["write", "read-only"]).optional().describe("read-only permits only read/glob/grep via a restricted OpenCode agent. Write mode can edit and execute commands. Defaults from auto for backward compatibility."),
   worktree: boolean2().optional().describe("Create a retained isolated git worktree for a new write task. Source tree must be clean. Follow up with the returned cwd/session_id; no automatic merge or deletion."),
-  title: string2().optional().describe("Session title shown in opencode."),
-  timeout_s: number2().int().positive().max(86400).optional().describe(`Total preparation/execution deadline in seconds (maximum 86400). Default: ${config2.timeoutSec}.`)
+  title: string2().optional().describe('Session title shown in opencode. Default: "delegate <8 hex chars>". Always set, so opencode never makes a title-generation model call.'),
+  idle_timeout_s: number2().int().positive().optional().describe(`Kill the run if no output event arrives for this many seconds (resets on every event). Default: ${config2.idleTimeoutSec}.`),
+  timeout_s: number2().int().positive().max(86400).optional().describe(`Optional absolute ceiling on total preparation/execution time in seconds (maximum 86400), regardless of activity.${config2.timeoutSec ? ` Default: ${config2.timeoutSec}.` : " Default: none."}`)
 };
 server.registerTool("list_models", {
   title: "List opencode models",

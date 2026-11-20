@@ -55,14 +55,25 @@ const delegateShape = {
     .describe(
       "Create a retained isolated git worktree for a new write task. Source tree must be clean. Follow up with the returned cwd/session_id; no automatic merge or deletion.",
     ),
-  title: z.string().optional().describe("Session title shown in opencode."),
+  title: z
+    .string()
+    .optional()
+    .describe('Session title shown in opencode. Default: "delegate <8 hex chars>". Always set, so opencode never makes a title-generation model call.'),
+  idle_timeout_s: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(`Kill the run if no output event arrives for this many seconds (resets on every event). Default: ${config.idleTimeoutSec}.`),
   timeout_s: z
     .number()
     .int()
     .positive()
     .max(86400)
     .optional()
-    .describe(`Total preparation/execution deadline in seconds (maximum 86400). Default: ${config.timeoutSec}.`),
+    .describe(
+      `Optional absolute ceiling on total preparation/execution time in seconds (maximum 86400), regardless of activity.${config.timeoutSec ? ` Default: ${config.timeoutSec}.` : " Default: none."}`,
+    ),
 };
 
 server.registerTool(

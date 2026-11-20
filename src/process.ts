@@ -5,7 +5,10 @@ export interface ProcessOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Wall-clock limit; defaults to the helper deadline, 0 disables it. */
   timeoutMs?: number;
+  /** Kill when no stdout line arrives for this long; resets on every line. */
+  idleTimeoutMs?: number;
   maxBytes?: number;
   onLine?: (line: string) => void;
 }
@@ -15,6 +18,7 @@ export interface ProcessResult {
   stderr: string;
   error?: string;
   timedOut: boolean;
+  idleTimedOut?: boolean;
 }
 
 const active = new Set<() => void>();
@@ -56,6 +60,7 @@ export function runProcess(bin: string, args: string[], o: ProcessOptions = {}):
       buffer = "";
     let bytes = 0,
       timedOut = false,
+      idleTimedOut = false,
       error: string | undefined;
     let stopped = false,
       closed = false,
@@ -64,15 +69,17 @@ export function runProcess(bin: string, args: string[], o: ProcessOptions = {}):
     let forceTimer: ReturnType<typeof setTimeout> | undefined;
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = () => {
       if (!closed || !reaped) return;
       if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       if (forceTimer) clearTimeout(forceTimer);
       if (closeTimer) clearTimeout(closeTimer);
       o.signal?.removeEventListener("abort", cancel);
       active.delete(stop);
-      resolve({ code, stdout, stderr, error, timedOut });
+      resolve({ code, stdout, stderr, error, timedOut, idleTimedOut });
     };
     const force = () => {
       try {
@@ -108,14 +115,24 @@ export function runProcess(bin: string, args: string[], o: ProcessOptions = {}):
     o.signal?.addEventListener("abort", cancel, { once: true });
     // Abort may have arrived between the first check and listener registration.
     if (o.signal?.aborted) cancel();
-    timer = setTimeout(
-      () => {
+    const wallMs = o.timeoutMs ?? config.helperTimeoutSec * 1000;
+    if (wallMs > 0) {
+      timer = setTimeout(() => {
         timedOut = true;
         error ??= "process timed out";
         stop();
-      },
-      o.timeoutMs ?? config.helperTimeoutSec * 1000,
-    );
+      }, wallMs);
+    }
+    const armIdle = () => {
+      if (!o.idleTimeoutMs || stopped) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        timedOut = idleTimedOut = true;
+        error ??= `idle timeout: no activity for ${Math.round(o.idleTimeoutMs! / 1000)}s`;
+        stop();
+      }, o.idleTimeoutMs);
+    };
+    armIdle();
 
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       if (stopped) return;
@@ -134,6 +151,7 @@ export function runProcess(bin: string, args: string[], o: ProcessOptions = {}):
       while ((i = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, i);
         buffer = buffer.slice(i + 1);
+        armIdle();
         try {
           o.onLine(line);
         } catch (e) {
